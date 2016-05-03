@@ -33,7 +33,6 @@ import org.stagemonitor.web.monitor.DefaultMonitoredHttpRequestFactory;
 import org.stagemonitor.web.monitor.HttpRequestTrace;
 import org.stagemonitor.web.monitor.MonitoredHttpRequest;
 import org.stagemonitor.web.monitor.MonitoredHttpRequestFactory;
-import org.stagemonitor.web.monitor.rum.BoomerangJsHtmlInjector;
 
 public class HttpRequestMonitorFilter extends AbstractExclusionFilter implements Filter {
 
@@ -69,13 +68,13 @@ public class HttpRequestMonitorFilter extends AbstractExclusionFilter implements
 	@Override
 	public void initInternal(FilterConfig filterConfig) throws ServletException {
 		final MeasurementSession measurementSession = new MeasurementSession(getApplicationName(filterConfig),
-				MeasurementSession.getNameOfLocalHost(), corePlugin.getInstanceName());
+				corePlugin.getHostName(), corePlugin.getInstanceName());
 		Stagemonitor.setMeasurementSession(measurementSession);
 		final ServletContext servletContext = filterConfig.getServletContext();
 		atLeastServletApi3 = servletContext.getMajorVersion() >= 3;
 
 		for (HtmlInjector htmlInjector : ServiceLoader.load(HtmlInjector.class)) {
-			htmlInjector.init(configuration, servletContext);
+			htmlInjector.init(new HtmlInjector.InitArguments(configuration, servletContext));
 			htmlInjectors.add(htmlInjector);
 		}
 	}
@@ -94,7 +93,6 @@ public class HttpRequestMonitorFilter extends AbstractExclusionFilter implements
 	@Override
 	public final void doFilterInternal(final HttpServletRequest request, final HttpServletResponse response, final FilterChain filterChain)
 			throws IOException, ServletException {
-		setCachingHeadersForBommerangJs(request, response);
 		if (corePlugin.isStagemonitorActive() && !isInternalRequest(request) &&
 				onlyMonitorForwardedRequestsIfConfigured(request)) {
 			doMonitor(request, response, filterChain);
@@ -128,13 +126,6 @@ public class HttpRequestMonitorFilter extends AbstractExclusionFilter implements
 		}
 	}
 
-	// TODO move to FileServlet
-	private void setCachingHeadersForBommerangJs(HttpServletRequest request, HttpServletResponse response) {
-		if (request.getRequestURI().endsWith(BoomerangJsHtmlInjector.BOOMERANG_FILENAME)) {
-			response.setHeader("cache-control", "public, max-age=315360000");
-		}
-	}
-
 	private boolean isInjectContentToHtml(HttpServletRequest httpServletRequest) {
 		if (logger.isDebugEnabled()) {
 			logger.debug("atLeastServletApi3={} isHtmlRequested={} isAtLeastOneHtmlInjectorActive={}",
@@ -145,7 +136,7 @@ public class HttpRequestMonitorFilter extends AbstractExclusionFilter implements
 
 	private boolean isAtLeastOneHtmlInjectorActive(HttpServletRequest httpServletRequest) {
 		for (HtmlInjector htmlInjector : htmlInjectors) {
-			if (htmlInjector.isActive(httpServletRequest)) {
+			if (htmlInjector.isActive(new HtmlInjector.IsActiveArguments(httpServletRequest))) {
 				return true;
 			}
 		}
@@ -212,8 +203,10 @@ public class HttpRequestMonitorFilter extends AbstractExclusionFilter implements
 
 	private String getContetToInject(HttpServletRequest httpServletRequest, RequestMonitor.RequestInformation<HttpRequestTrace> requestInformation, String content) {
 		for (HtmlInjector htmlInjector : htmlInjectors) {
-			if (htmlInjector.isActive(httpServletRequest)) {
-				content = injectBeforeClosingBody(content, htmlInjector.getContentToInjectBeforeClosingBody(requestInformation));
+			if (htmlInjector.isActive(new HtmlInjector.IsActiveArguments(httpServletRequest))) {
+				final HtmlInjector.InjectArguments injectArguments = new HtmlInjector.InjectArguments(requestInformation);
+				htmlInjector.injectHtml(injectArguments);
+				content = injectBeforeClosingBody(content, injectArguments);
 			}
 		}
 		return content;
@@ -231,13 +224,13 @@ public class HttpRequestMonitorFilter extends AbstractExclusionFilter implements
 		}
 	}
 
-	private String injectBeforeClosingBody(String unmodifiedContent, String contentToInject) {
+	private String injectBeforeClosingBody(String unmodifiedContent, HtmlInjector.InjectArguments injectArguments) {
 		final int lastClosingBodyIndex = unmodifiedContent.lastIndexOf("</body>");
 		final String modifiedContent;
 		if (lastClosingBodyIndex > -1) {
-			final StringBuilder modifiedContentStringBuilder = new StringBuilder(unmodifiedContent.length() + contentToInject.length());
+			final StringBuilder modifiedContentStringBuilder = new StringBuilder(unmodifiedContent.length() + injectArguments.getContentToInjectBeforeClosingBody().length());
 			modifiedContentStringBuilder.append(unmodifiedContent.substring(0, lastClosingBodyIndex));
-			modifiedContentStringBuilder.append(contentToInject);
+			modifiedContentStringBuilder.append(injectArguments.getContentToInjectBeforeClosingBody());
 			modifiedContentStringBuilder.append(unmodifiedContent.substring(lastClosingBodyIndex));
 			modifiedContent = modifiedContentStringBuilder.toString();
 		} else {

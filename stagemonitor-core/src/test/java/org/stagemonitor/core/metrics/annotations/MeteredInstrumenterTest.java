@@ -49,7 +49,6 @@ public class MeteredInstrumenterTest {
 	@Before
 	@After
 	public void clearMetricRegistry() {
-		MeteredInstrumenter.init();
 		Stagemonitor.getMetric2Registry().removeMatching(MetricFilter.ALL);
 	}
 

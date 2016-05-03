@@ -119,6 +119,7 @@ public class Configuration {
 
 	private void add(final ConfigurationOption<?> configurationOption) {
 		configurationOption.setConfigurationSources(configurationSources);
+		configurationOption.setConfiguration(this);
 
 		configurationOptionsByKey.put(configurationOption.getKey(), configurationOption);
 		addConfigurationOptionByCategory(configurationOption.getConfigurationCategory(), configurationOption);
@@ -307,10 +308,8 @@ public class Configuration {
 	 * @return <code>true</code>, if the password is correct, <code>false</code> otherwise
 	 */
 	public boolean isPasswordCorrect(String password) {
-		if (password == null) {
-			password = "";
-		}
-		return isPasswordSet() && getString(updateConfigPasswordKey).equals(password);
+		final String actualPassword = getString(updateConfigPasswordKey);
+		return "".equals(actualPassword) || actualPassword != null && actualPassword.equals(password);
 	}
 
 	/**

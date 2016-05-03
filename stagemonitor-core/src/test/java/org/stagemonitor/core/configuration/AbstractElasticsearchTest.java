@@ -15,6 +15,7 @@ import org.elasticsearch.node.NodeBuilder;
 import org.junit.After;
 import org.junit.BeforeClass;
 import org.stagemonitor.core.CorePlugin;
+import org.stagemonitor.core.Stagemonitor;
 import org.stagemonitor.core.elasticsearch.ElasticsearchClient;
 
 public class AbstractElasticsearchTest {
@@ -25,28 +26,29 @@ public class AbstractElasticsearchTest {
 	protected static int elasticsearchPort;
 	protected static ElasticsearchClient elasticsearchClient;
 	protected static String elasticsearchUrl;
+	protected static CorePlugin corePlugin;
 
 	@BeforeClass
 	public static void beforeClass() throws IOException {
+		Stagemonitor.init();
 		if (node == null) {
-			FileUtils.deleteQuietly(new File("build/elasticsearch"));
+			final File esHome = new File("build/elasticsearch");
+			FileUtils.deleteQuietly(esHome);
 			final NodeBuilder nodeBuilder = NodeBuilder.nodeBuilder().local(true);
 			elasticsearchPort = getAvailablePort();
 			nodeBuilder.settings()
+					.put("path.home", esHome.getAbsolutePath())
 					.put("name", "junit-es-node")
 					.put("node.http.enabled", "false")
 					.put("http.port", elasticsearchPort)
 					.put("path.logs", "build/elasticsearch/logs")
 					.put("path.data", "build/elasticsearch/data")
 					.put("index.store.fs.memory.enabled", "true")
-					.put("index.gateway.type", "none")
-					.put("gateway.type", "none")
-					.put("index.store.type", "memory")
 					.put("index.number_of_shards", "1")
 					.put("index.number_of_replicas", "0")
 					.put("discovery.zen.ping.multicast.enabled", "false");
 			elasticsearchUrl = "http://localhost:" + elasticsearchPort;
-			final CorePlugin corePlugin = mock(CorePlugin.class);
+			AbstractElasticsearchTest.corePlugin = mock(CorePlugin.class);
 			when(corePlugin.getElasticsearchUrl()).thenReturn(elasticsearchUrl);
 			when(corePlugin.getThreadPoolQueueCapacityLimit()).thenReturn(1000);
 			elasticsearchClient = new ElasticsearchClient(corePlugin);

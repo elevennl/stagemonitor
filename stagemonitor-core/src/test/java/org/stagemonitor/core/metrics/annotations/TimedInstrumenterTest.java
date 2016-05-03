@@ -52,7 +52,6 @@ public class TimedInstrumenterTest {
 
 	@Before
 	public void before() {
-		TimedInstrumenter.init();
 		Stagemonitor.getMetric2Registry().removeMatching(MetricFilter.ALL);
 	}
 

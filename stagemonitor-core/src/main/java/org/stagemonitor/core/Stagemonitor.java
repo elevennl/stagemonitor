@@ -11,13 +11,14 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
 import com.codahale.metrics.MetricRegistry;
-import com.codahale.metrics.SharedMetricRegistries;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.stagemonitor.core.configuration.Configuration;
 import org.stagemonitor.core.configuration.source.ConfigurationSource;
-import org.stagemonitor.core.instrument.MainStagemonitorClassFileTransformer;
+import org.stagemonitor.core.instrument.AgentAttacher;
+import org.stagemonitor.core.metrics.metrics2.Metric2Filter;
 import org.stagemonitor.core.metrics.metrics2.Metric2Registry;
+import org.stagemonitor.core.util.ClassUtils;
 
 public final class Stagemonitor {
 
@@ -31,7 +32,7 @@ public final class Stagemonitor {
 	private static List<String> pathsOfWidgetTabPlugins = Collections.emptyList();
 	private static Iterable<StagemonitorPlugin> plugins;
 	private static List<Runnable> onShutdownActions = new CopyOnWriteArrayList<Runnable>();
-	private static Metric2Registry metric2Registry;
+	private static Metric2Registry metric2Registry = new Metric2Registry();
 
 	static {
 		try {
@@ -53,7 +54,7 @@ public final class Stagemonitor {
 	}
 
 	public synchronized static void setMeasurementSession(MeasurementSession measurementSession) {
-		if (!getConfiguration(CorePlugin.class).isStagemonitorActive()) {
+		if (!getPlugin(CorePlugin.class).isStagemonitorActive()) {
 			logger.info("stagemonitor is deactivated");
 			disabled = true;
 		}
@@ -83,7 +84,10 @@ public final class Stagemonitor {
 	}
 
 	private synchronized static void doStartMonitoring() {
-		if (measurementSession.isInitialized() && !started) {
+		if (started) {
+			return;
+		}
+		if (measurementSession.isInitialized()) {
 			logger.info("Measurement Session is initialized: " + measurementSession);
 			try {
 				start();
@@ -100,16 +104,19 @@ public final class Stagemonitor {
 	private static void start() {
 		initializePlugins();
 		started = true;
-		// in case the application does not directly call shutDown
-		Runtime.getRuntime().addShutdownHook(new Thread(new Runnable() {
-			public void run() {
-				shutDown();
-			}
-		}));
+		// don't register a shutdown hook for web applications as this causes a memory leak
+		if (ClassUtils.isNotPresent("javax.servlet.Servlet")) {
+			// in case the application does not directly call shutDown
+			Runtime.getRuntime().addShutdownHook(new Thread(new Runnable() {
+				public void run() {
+					shutDown();
+				}
+			}));
+		}
 	}
 
 	private static void initializePlugins() {
-		final CorePlugin corePlugin = getConfiguration(CorePlugin.class);
+		final CorePlugin corePlugin = getPlugin(CorePlugin.class);
 		final Collection<String> disabledPlugins = corePlugin.getDisabledPlugins();
 		pathsOfWidgetMetricTabPlugins = new CopyOnWriteArrayList<String>();
 		pathsOfWidgetTabPlugins = new CopyOnWriteArrayList<String>();
@@ -127,10 +134,12 @@ public final class Stagemonitor {
 	private static void initializePlugin(final StagemonitorPlugin stagemonitorPlugin, String pluginName) {
 		logger.info("Initializing plugin {}", pluginName);
 		try {
-			stagemonitorPlugin.initializePlugin(getMetricRegistry(), getConfiguration());
+			stagemonitorPlugin.initializePlugin(new StagemonitorPlugin.InitArguments(metric2Registry, getConfiguration(), measurementSession));
 			stagemonitorPlugin.initializePlugin(metric2Registry, getConfiguration());
 			pathsOfWidgetMetricTabPlugins.addAll(stagemonitorPlugin.getPathsOfWidgetMetricTabPlugins());
 			pathsOfWidgetTabPlugins.addAll(stagemonitorPlugin.getPathsOfWidgetTabPlugins());
+			stagemonitorPlugin.registerWidgetTabPlugins(new StagemonitorPlugin.WidgetTabPluginsRegistry(pathsOfWidgetTabPlugins));
+			stagemonitorPlugin.registerWidgetMetricTabPlugins(new StagemonitorPlugin.WidgetMetricTabPluginsRegistry(pathsOfWidgetMetricTabPlugins));
 			onShutdownActions.add(new Runnable() {
 				public void run() {
 					stagemonitorPlugin.onShutDown();
@@ -177,8 +186,16 @@ public final class Stagemonitor {
 		return configuration;
 	}
 
-	public static <T extends StagemonitorPlugin> T getConfiguration(Class<T> plugin) {
+	public static <T extends StagemonitorPlugin> T getPlugin(Class<T> plugin) {
 		return configuration.getConfig(plugin);
+	}
+
+	/**
+	 * @deprecated use {@link #getPlugin(Class)}
+	 */
+	@Deprecated
+	public static <T extends StagemonitorPlugin> T getConfiguration(Class<T> plugin) {
+		return getPlugin(plugin);
 	}
 
 	static void setConfiguration(Configuration configuration) {
@@ -221,26 +238,25 @@ public final class Stagemonitor {
 		started = false;
 		disabled = false;
 		measurementSession = new MeasurementSession(null, null, null);
-		metric2Registry = new Metric2Registry();
-		reloadConfiguration();
+		metric2Registry.removeMatching(Metric2Filter.ALL);
+		if (configuration == null) {
+			reloadPluginsAndConfiguration();
+		}
 		tryStartMonitoring();
-		onShutdownActions.add(MainStagemonitorClassFileTransformer.performRuntimeAttachment());
+		onShutdownActions.add(AgentAttacher.performRuntimeAttachment());
 	}
 
 	private static void tryStartMonitoring() {
-		CorePlugin corePlugin = getConfiguration(CorePlugin.class);
+		CorePlugin corePlugin = getPlugin(CorePlugin.class);
 		MeasurementSession session = new MeasurementSession(corePlugin.getApplicationName(),
-				MeasurementSession.getNameOfLocalHost(), corePlugin.getInstanceName());
+				corePlugin.getHostName(), corePlugin.getInstanceName());
 		startMonitoring(session);
 	}
 
-	private static void reloadConfiguration() {
-		if (configuration != null) {
-			configuration.close();
-		}
+	private static void reloadPluginsAndConfiguration() {
 		List<ConfigurationSource> configurationSources = new ArrayList<ConfigurationSource>();
 		for (StagemonitorConfigurationSourceInitializer initializer : ServiceLoader.load(StagemonitorConfigurationSourceInitializer.class, Stagemonitor.class.getClassLoader())) {
-			initializer.modifyConfigurationSources(configurationSources);
+			initializer.modifyConfigurationSources(new StagemonitorConfigurationSourceInitializer.ModifyArguments(configurationSources));
 		}
 		configurationSources.remove(null);
 
@@ -249,7 +265,7 @@ public final class Stagemonitor {
 
 		try {
 			for (StagemonitorConfigurationSourceInitializer initializer : ServiceLoader.load(StagemonitorConfigurationSourceInitializer.class, Stagemonitor.class.getClassLoader())) {
-				initializer.onConfigurationInitialized(configuration);
+				initializer.onConfigurationInitialized(new StagemonitorConfigurationSourceInitializer.ConfigInitializedArguments(configuration));
 			}
 		} catch (Exception e) {
 			logger.error(e.getMessage(), e);

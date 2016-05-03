@@ -1,5 +1,6 @@
 package org.stagemonitor.core.util;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -13,6 +14,9 @@ public class IOUtils {
 	private static final int EOF = -1;
 	private static final int BUFFER_SIZE = 4096;
 	private static final Logger logger = LoggerFactory.getLogger(IOUtils.class);
+
+	private IOUtils() {
+	}
 
 	public static void copy(InputStream input, OutputStream output) throws IOException {
 		int n;
@@ -73,5 +77,11 @@ public class IOUtils {
 		} catch (IOException e) {
 			throw new RuntimeException(e);
 		}
+	}
+
+	public static byte[] readToBytes(InputStream inputStream) throws IOException {
+		final ByteArrayOutputStream output = new ByteArrayOutputStream();
+		copy(inputStream, output);
+		return output.toByteArray();
 	}
 }

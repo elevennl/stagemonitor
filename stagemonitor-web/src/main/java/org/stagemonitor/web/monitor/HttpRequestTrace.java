@@ -7,7 +7,9 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import net.sf.uadetector.ReadableUserAgent;
 import net.sf.uadetector.UserAgentStringParser;
 import net.sf.uadetector.service.UADetectorServiceFactory;
+import org.stagemonitor.core.MeasurementSession;
 import org.stagemonitor.core.Stagemonitor;
+import org.stagemonitor.requestmonitor.RequestMonitorPlugin;
 import org.stagemonitor.requestmonitor.RequestTrace;
 import org.stagemonitor.web.WebPlugin;
 
@@ -32,18 +34,25 @@ public class HttpRequestTrace extends RequestTrace {
 	private final String method;
 	private Integer bytesWritten;
 	private UserAgentInformation userAgent;
-	private final String sessionId;
+	private String sessionId;
 	@JsonIgnore
 	private final String connectionId;
 	@JsonIgnore
 	private final boolean showWidgetAllowed;
+	private String referringSite;
 
 	public HttpRequestTrace(String requestId, String url, Map<String, String> headers, String method,
-							String sessionId, String connectionId, boolean showWidgetAllowed) {
-		super(requestId);
+							String connectionId, boolean showWidgetAllowed) {
+		this(requestId, url, headers, method, connectionId, showWidgetAllowed,
+				Stagemonitor.getMeasurementSession(), Stagemonitor.getPlugin(RequestMonitorPlugin.class));
+	}
+
+	public HttpRequestTrace(String requestId, String url, Map<String, String> headers, String method,
+							String connectionId, boolean showWidgetAllowed,
+							MeasurementSession measurementSession, RequestMonitorPlugin requestMonitorPlugin) {
+		super(requestId, measurementSession, requestMonitorPlugin);
 		this.url = url;
 		this.headers = headers;
-		this.sessionId = sessionId;
 		this.connectionId = connectionId;
 		this.method = method;
 		this.showWidgetAllowed = showWidgetAllowed;
@@ -126,7 +135,7 @@ public class HttpRequestTrace extends RequestTrace {
 	}
 
 	public UserAgentInformation getUserAgent() {
-		if (userAgent == null && headers != null && Stagemonitor.getConfiguration(WebPlugin.class).isParseUserAgent()) {
+		if (userAgent == null && headers != null && Stagemonitor.getPlugin(WebPlugin.class).isParseUserAgent()) {
 			final String userAgentHeader = headers.get("user-agent");
 			if (userAgentHeader != null) {
 				ReadableUserAgent readableUserAgent = userAgentCache.get(userAgentHeader);
@@ -147,6 +156,10 @@ public class HttpRequestTrace extends RequestTrace {
 		return sessionId;
 	}
 
+	public void setSessionId(String sessionId) {
+		this.sessionId = sessionId;
+	}
+
 	/**
 	 * The connection id is used to associate ajax requests with a particular browser window in which the
 	 * stagemonitor widget is running.
@@ -161,6 +174,14 @@ public class HttpRequestTrace extends RequestTrace {
 
 	public boolean isShowWidgetAllowed() {
 		return showWidgetAllowed;
+	}
+
+	public void setReferringSite(String referringSite) {
+		this.referringSite = referringSite;
+	}
+
+	public String getReferringSite() {
+		return referringSite;
 	}
 
 	@Override

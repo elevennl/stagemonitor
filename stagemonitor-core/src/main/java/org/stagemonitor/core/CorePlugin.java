@@ -5,6 +5,7 @@ import static org.stagemonitor.core.util.GraphiteSanitizer.sanitizeGraphiteMetri
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.util.Collection;
 import java.util.Collections;
@@ -14,14 +15,11 @@ import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.regex.Pattern;
 
 import com.codahale.metrics.Clock;
 import com.codahale.metrics.Gauge;
 import com.codahale.metrics.JmxReporter;
-import com.codahale.metrics.MetricFilter;
 import com.codahale.metrics.MetricRegistry;
-import com.codahale.metrics.ScheduledReporter;
 import com.codahale.metrics.graphite.Graphite;
 import com.codahale.metrics.graphite.GraphiteReporter;
 import org.slf4j.Logger;
@@ -29,20 +27,22 @@ import org.slf4j.LoggerFactory;
 import org.stagemonitor.core.configuration.Configuration;
 import org.stagemonitor.core.configuration.ConfigurationOption;
 import org.stagemonitor.core.configuration.converter.ListValueConverter;
+import org.stagemonitor.core.configuration.converter.SetValueConverter;
 import org.stagemonitor.core.elasticsearch.ElasticsearchClient;
 import org.stagemonitor.core.elasticsearch.IndexSelector;
 import org.stagemonitor.core.grafana.GrafanaClient;
-import org.stagemonitor.core.metrics.AndMetricFilter;
+import org.stagemonitor.core.metrics.MetricNameFilter;
 import org.stagemonitor.core.metrics.MetricsAggregationReporter;
 import org.stagemonitor.core.metrics.MetricsWithCountFilter;
-import org.stagemonitor.core.metrics.RegexMetricFilter;
-import org.stagemonitor.core.metrics.SimpleElasticsearchReporter;
 import org.stagemonitor.core.metrics.SortedTableLogReporter;
+import org.stagemonitor.core.metrics.metrics2.AndMetric2Filter;
 import org.stagemonitor.core.metrics.metrics2.ElasticsearchReporter;
 import org.stagemonitor.core.metrics.metrics2.InfluxDbReporter;
 import org.stagemonitor.core.metrics.metrics2.Metric2Filter;
 import org.stagemonitor.core.metrics.metrics2.Metric2Registry;
 import org.stagemonitor.core.metrics.metrics2.MetricName;
+import org.stagemonitor.core.metrics.metrics2.MetricNameValueConverter;
+import org.stagemonitor.core.metrics.metrics2.ScheduledMetrics2Reporter;
 import org.stagemonitor.core.util.HttpClient;
 import org.stagemonitor.core.util.IOUtils;
 import org.stagemonitor.core.util.StringUtils;
@@ -56,10 +56,12 @@ public class CorePlugin extends StagemonitorPlugin {
 
 	private static final String CORE_PLUGIN_NAME = "Core";
 	public static final String POOLS_QUEUE_CAPACITY_LIMIT_KEY = "stagemonitor.threadPools.queueCapacityLimit";
+	private static final String ELASTICSEARCH = "elasticsearch";
+	private static final String METRICS_STORE = "metrics-store";
 
 	private final Logger logger = LoggerFactory.getLogger(getClass());
 
-	final ConfigurationOption<Boolean> stagemonitorActive = ConfigurationOption.booleanOption()
+	private final ConfigurationOption<Boolean> stagemonitorActive = ConfigurationOption.booleanOption()
 			.key("stagemonitor.active")
 			.dynamic(true)
 			.label("Activate stagemonitor")
@@ -99,7 +101,7 @@ public class CorePlugin extends StagemonitorPlugin {
 			.dynamic(false)
 			.label("Expose MBeans")
 			.description("Whether or not to expose all metrics as MBeans.")
-			.defaultValue(true)
+			.defaultValue(false)
 			.configurationCategory(CORE_PLUGIN_NAME)
 			.build();
 	private final ConfigurationOption<Integer> reportingIntervalGraphite = ConfigurationOption.integerOption()
@@ -110,7 +112,7 @@ public class CorePlugin extends StagemonitorPlugin {
 					"To deactivate graphite reporting, set this to a value below 1, or don't provide " +
 					"stagemonitor.reporting.graphite.hostName.")
 			.defaultValue(60)
-			.tags("metrics-store", "graphite")
+			.tags(METRICS_STORE, "graphite")
 			.configurationCategory(CORE_PLUGIN_NAME)
 			.build();
 	private final ConfigurationOption<String> graphiteHostName = ConfigurationOption.stringOption()
@@ -120,7 +122,7 @@ public class CorePlugin extends StagemonitorPlugin {
 			.description("The name of the host where graphite is running. This setting is mandatory, if you want " +
 					"to use the grafana dashboards.")
 			.defaultValue(null)
-			.tags("metrics-store", "graphite")
+			.tags(METRICS_STORE, "graphite")
 			.configurationCategory(CORE_PLUGIN_NAME)
 			.build();
 	private final ConfigurationOption<Integer> graphitePort = ConfigurationOption.integerOption()
@@ -129,7 +131,7 @@ public class CorePlugin extends StagemonitorPlugin {
 			.label("Carbon port")
 			.description("The port where carbon is listening.")
 			.defaultValue(2003)
-			.tags("metrics-store", "graphite")
+			.tags(METRICS_STORE, "graphite")
 			.configurationCategory(CORE_PLUGIN_NAME)
 			.build();
 	private final ConfigurationOption<String> influxDbUrl = ConfigurationOption.stringOption()
@@ -138,7 +140,7 @@ public class CorePlugin extends StagemonitorPlugin {
 			.label("InfluxDB URL")
 			.description("The URL of your InfluxDB installation.")
 			.defaultValue(null)
-			.tags("metrics-store", "influx-db")
+			.tags(METRICS_STORE, "influx-db")
 			.configurationCategory(CORE_PLUGIN_NAME)
 			.build();
 	private final ConfigurationOption<String> influxDbDb = ConfigurationOption.stringOption()
@@ -147,7 +149,7 @@ public class CorePlugin extends StagemonitorPlugin {
 			.label("InfluxDB database")
 			.description("The target database")
 			.defaultValue("stagemonitor")
-			.tags("metrics-store", "influx-db")
+			.tags(METRICS_STORE, "influx-db")
 			.configurationCategory(CORE_PLUGIN_NAME)
 			.build();
 	private final ConfigurationOption<Integer> reportingIntervalInfluxDb = ConfigurationOption.integerOption()
@@ -156,7 +158,7 @@ public class CorePlugin extends StagemonitorPlugin {
 			.label("Reporting interval InfluxDb")
 			.description("The amount of time between the metrics are reported to InfluxDB (in seconds).")
 			.defaultValue(60)
-			.tags("metrics-store", "influx-db")
+			.tags(METRICS_STORE, "influx-db")
 			.configurationCategory(CORE_PLUGIN_NAME)
 			.build();
 	private final ConfigurationOption<Integer> reportingIntervalElasticsearch = ConfigurationOption.integerOption()
@@ -165,7 +167,7 @@ public class CorePlugin extends StagemonitorPlugin {
 			.label("Reporting interval Elasticsearch")
 			.description("The amount of time between the metrics are reported to Elasticsearch (in seconds).")
 			.defaultValue(60)
-			.tags("metrics-store", "elasticsearch")
+			.tags(METRICS_STORE, ELASTICSEARCH)
 			.configurationCategory(CORE_PLUGIN_NAME)
 			.build();
 	private final ConfigurationOption<Boolean> onlyLogElasticsearchMetricReports = ConfigurationOption.booleanOption()
@@ -176,7 +178,7 @@ public class CorePlugin extends StagemonitorPlugin {
 					"The name of the logger is %s. That way you can redirect the reporting to a separate log file and use logstash or a " +
 					"different external process to send the metrics to elasticsearch.", ElasticsearchReporter.ES_METRICS_LOGGER))
 			.defaultValue(false)
-			.tags("metrics-store", "elasticsearch")
+			.tags(METRICS_STORE, ELASTICSEARCH)
 			.configurationCategory(CORE_PLUGIN_NAME)
 			.build();
 	private final ConfigurationOption<Integer> deleteElasticsearchMetricsAfterDays = ConfigurationOption.integerOption()
@@ -185,7 +187,7 @@ public class CorePlugin extends StagemonitorPlugin {
 			.label("Delete ES metrics after (days)")
 			.description("The number of days after the metrics stored in elasticsearch should be deleted. Set below 1 to deactivate.")
 			.defaultValue(-1)
-			.tags("metrics-store", "elasticsearch")
+			.tags(METRICS_STORE, ELASTICSEARCH)
 			.configurationCategory(CORE_PLUGIN_NAME)
 			.build();
 	private final ConfigurationOption<Integer> moveToColdNodesAfterDays = ConfigurationOption.integerOption()
@@ -198,7 +200,7 @@ public class CorePlugin extends StagemonitorPlugin {
 					"beefy nodes with node.box_type: hot (either in elasticsearch.yml or start the node using ./bin/elasticsearch --node.box_type hot)" +
 					"and your historical nodes with node.box_type: cold.")
 			.defaultValue(-1)
-			.tags("metrics-store", "elasticsearch")
+			.tags(METRICS_STORE, ELASTICSEARCH)
 			.configurationCategory(CORE_PLUGIN_NAME)
 			.build();
 	private final ConfigurationOption<String> applicationName = ConfigurationOption.stringOption()
@@ -223,6 +225,16 @@ public class CorePlugin extends StagemonitorPlugin {
 			.configurationCategory(CORE_PLUGIN_NAME)
 			.tags("important")
 			.build();
+	private final ConfigurationOption<String> hostName = ConfigurationOption.stringOption()
+			.key("stagemonitor.hostName")
+			.dynamic(false)
+			.label("Host name")
+			.description("The host name.\n" +
+					"If this property is not set, the host name will default to resolving the host name for localhost, " +
+					"if this fails it will be loaded from the environment, either from COMPUTERNAME or HOSTNAME.")
+			.defaultValue(getNameOfLocalHost())
+			.configurationCategory(CORE_PLUGIN_NAME)
+			.build();
 	private final ConfigurationOption<List<String>> elasticsearchUrls = ConfigurationOption.builder(ListValueConverter.STRINGS_VALUE_CONVERTER, List.class)
 			.key("stagemonitor.elasticsearch.url")
 			.dynamic(true)
@@ -230,6 +242,7 @@ public class CorePlugin extends StagemonitorPlugin {
 			.description("A comma separated list of the Elasticsearch URLs that store the request traces and metrics.")
 			.defaultValue(Collections.<String>emptyList())
 			.configurationCategory(CORE_PLUGIN_NAME)
+			.tags(ELASTICSEARCH)
 			.build();
 	private final ConfigurationOption<Collection<String>> elasticsearchConfigurationSourceProfiles = ConfigurationOption.stringsOption()
 			.key("stagemonitor.elasticsearch.configurationSourceProfiles")
@@ -253,12 +266,13 @@ public class CorePlugin extends StagemonitorPlugin {
 			.defaultValue(true)
 			.configurationCategory(CORE_PLUGIN_NAME)
 			.build();
-	private final ConfigurationOption<Collection<Pattern>> excludedMetrics = ConfigurationOption.regexListOption()
+	private final ConfigurationOption<Collection<MetricName>> excludedMetrics = ConfigurationOption
+			.builder(new SetValueConverter<MetricName>(new MetricNameValueConverter()), Collection.class)
 			.key("stagemonitor.metrics.excluded.pattern")
 			.dynamic(false)
-			.label("Excluded metrics (regex)")
+			.label("Excluded metric names")
 			.description("A comma separated list of metric names that should not be collected.")
-			.defaultValue(Collections.<Pattern>emptyList())
+			.defaultValue(Collections.<MetricName>emptyList())
 			.configurationCategory(CORE_PLUGIN_NAME)
 			.build();
 	private final ConfigurationOption<Collection<String>> disabledPlugins = ConfigurationOption.stringsOption()
@@ -283,75 +297,7 @@ public class CorePlugin extends StagemonitorPlugin {
 			.dynamic(true)
 			.label("Excluded packages")
 			.description("Exclude packages and their sub-packages from the instrumentation (for example the profiler).")
-			.defaultValue(new LinkedHashSet<String>() {{
-				add("antlr");
-				add("aopalliance");
-				add("asm");
-				add("c3p0");
-				add("ch.qos");
-				add("com.amazon");
-				add("com.codahale");
-				add("com.fasterxml");
-				add("com.github");
-				add("com.google");
-				add("com.maxmind");
-				add("com.oracle");
-				add("com.p6spy");
-				add("com.rome");
-				add("com.spartial");
-				add("com.sun");
-				add("com.thoughtworks");
-				add("com.vaadin");
-				add("commons-");
-				add("dom4j");
-				add("eclipse");
-				add("java.");
-				add("javax.");
-				add("junit");
-				add("net.java");
-				add("net.sf");
-				add("net.sourceforge");
-				add("nz.net");
-				add("ognl");
-				add("oracle");
-				add("org.antlr");
-				add("org.apache");
-				add("org.aspectj");
-				add("org.codehaus");
-				add("org.eclipse");
-				add("org.freemarker");
-				add("org.glassfish");
-				add("org.groovy");
-				add("org.hibernate");
-				add("org.hsqldb");
-				add("org.jadira");
-				add("org.javassist");
-				add("org.jboss");
-				add("org.jdom");
-				add("org.joda");
-				add("org.jsoup");
-				add("org.json");
-				add("org.unbescape");
-				add("org.elasticsearch");
-				add("org.slf4j");
-				add("org.springframework");
-				add("org.stagemonitor");
-				add("org.thymeleaf");
-				add("org.yaml");
-				add("org.wildfly");
-				add("org.zeroturnaround");
-				add("org.xml");
-				add("io.dropwizard");
-				add("freemarker");
-				add("javassist");
-				add("uadetector");
-				add("p6spy");
-				add("rome");
-				add("sun");
-				add("xerces");
-				add("xml");
-				add("xmpp");
-			}})
+			.defaultValue(Collections.<String>emptySet())
 			.configurationCategory(CORE_PLUGIN_NAME)
 			.build();
 	private final ConfigurationOption<Collection<String>> excludeContaining = ConfigurationOption.stringsOption()
@@ -391,8 +337,16 @@ public class CorePlugin extends StagemonitorPlugin {
 			.key("stagemonitor.instrument.excludedInstrumenter")
 			.dynamic(false)
 			.label("Excluded Instrumenters")
-			.description("A list of the simple class names of StagemonitorJavassistInstrumenters that should not be applied")
+			.description("A list of the simple class names of StagemonitorByteBuddyTransformers that should not be applied")
 			.defaultValue(Collections.<String>emptySet())
+			.configurationCategory(CORE_PLUGIN_NAME)
+			.build();
+	private final ConfigurationOption<Boolean> debugInstrumentation = ConfigurationOption.booleanOption()
+			.key("stagemonitor.instrument.debug")
+			.dynamic(false)
+			.label("Debug instrumentation")
+			.description("Set to true to log additional information and warnings during the instrumentation process.")
+			.defaultValue(false)
 			.configurationCategory(CORE_PLUGIN_NAME)
 			.build();
 	private final ConfigurationOption<String> grafanaUrl = ConfigurationOption.stringOption()
@@ -429,6 +383,16 @@ public class CorePlugin extends StagemonitorPlugin {
 			.configurationCategory(CORE_PLUGIN_NAME)
 			.tags("advanced")
 			.build();
+	private final ConfigurationOption<String> metricsIndexTemplate = ConfigurationOption.stringOption()
+			.key("stagemonitor.reporting.elasticsearch.metricsIndexTemplate")
+			.dynamic(true)
+			.label("ES Metrics Index Template")
+			.description("The classpath location of the index template that is used for the stagemonitor-metrics-* indices. " +
+					"By specifying the location to your own template, you can fully customize the index template.")
+			.defaultValue("stagemonitor-elasticsearch-metrics-index-template.json")
+			.configurationCategory(CORE_PLUGIN_NAME)
+			.tags(METRICS_STORE, ELASTICSEARCH)
+			.build();
 
 	private static MetricsAggregationReporter aggregationReporter;
 
@@ -448,14 +412,14 @@ public class CorePlugin extends StagemonitorPlugin {
 	}
 
 	@Override
-	public void initializePlugin(Metric2Registry metricRegistry, Configuration configuration) {
-		this.metricRegistry = metricRegistry;
+	public void initializePlugin(InitArguments initArguments) {
+		this.metricRegistry = initArguments.getMetricRegistry();
 		final Integer reloadInterval = getReloadConfigurationInterval();
 		if (reloadInterval > 0) {
-			configuration.scheduleReloadAtRate(reloadInterval, TimeUnit.SECONDS);
+			initArguments.getConfiguration().scheduleReloadAtRate(reloadInterval, TimeUnit.SECONDS);
 		}
 
-		metricRegistry.register(MetricName.name("online").build(), new Gauge<Integer>() {
+		initArguments.getMetricRegistry().register(MetricName.name("online").build(), new Gauge<Integer>() {
 			@Override
 			public Integer getValue() {
 				return 1;
@@ -471,59 +435,52 @@ public class CorePlugin extends StagemonitorPlugin {
 			final GrafanaClient grafanaClient = getGrafanaClient();
 			grafanaClient.createElasticsearchDatasource(getElasticsearchUrl());
 		}
-		registerReporters(metricRegistry, configuration, Stagemonitor.getMeasurementSession());
+		registerReporters(initArguments.getMetricRegistry(), initArguments.getConfiguration(), initArguments.getMeasurementSession());
 	}
 
 	void registerReporters(Metric2Registry metric2Registry, Configuration configuration, MeasurementSession measurementSession) {
-		Collection<Pattern> excludedMetricsPatterns = getExcludedMetricsPatterns();
-		MetricFilter regexFilter = MetricFilter.ALL;
+		Metric2Filter regexFilter = Metric2Filter.ALL;
+		Collection<MetricName> excludedMetricsPatterns = getExcludedMetricsPatterns();
 		if (!excludedMetricsPatterns.isEmpty()) {
-			regexFilter = RegexMetricFilter.excludePatterns(excludedMetricsPatterns);
+			regexFilter = MetricNameFilter.excludePatterns(excludedMetricsPatterns);
 		}
 		
-		MetricFilter allFilters = new AndMetricFilter(regexFilter, new MetricsWithCountFilter());
+		Metric2Filter allFilters = new AndMetric2Filter(regexFilter, new MetricsWithCountFilter());
 		MetricRegistry metricRegistry = metric2Registry.getMetricRegistry();
 
-		reportToGraphite(metricRegistry, getGraphiteReportingInterval(),
-				measurementSession, allFilters);
+		reportToGraphite(metricRegistry, getGraphiteReportingInterval(), measurementSession);
 		reportToInfluxDb(metric2Registry, reportingIntervalInfluxDb.getValue(),
 				measurementSession);
 		reportToElasticsearch(metric2Registry, reportingIntervalElasticsearch.getValue(),
 				measurementSession, configuration.getConfig(CorePlugin.class));
 
-
-		List<ScheduledReporter> onShutdownReporters = new LinkedList<ScheduledReporter>();
-		onShutdownReporters.add(new SimpleElasticsearchReporter(getElasticsearchClient(), metricRegistry, "simple-es-reporter", allFilters));
-
-		reportToConsole(metricRegistry, getConsoleReportingInterval(), allFilters, onShutdownReporters);
-		registerAggregationReporter(metricRegistry, allFilters, onShutdownReporters, getAggregationReportingInterval());
-		if (reportToJMX()) {
+		List<ScheduledMetrics2Reporter> onShutdownReporters = new LinkedList<ScheduledMetrics2Reporter>();
+		onShutdownReporters.add(reportToConsole(metric2Registry, getConsoleReportingInterval(), allFilters));
+		registerAggregationReporter(metric2Registry, onShutdownReporters, getAggregationReportingInterval());
+		if (configuration.getConfig(CorePlugin.class).isReportToJMX()) {
 			// Because JMX reporter is on registration and not periodic only the
 			// regex filter is applicable here (not filtering metrics by count)
-			reportToJMX(metricRegistry, regexFilter);
+			reportToJMX(metricRegistry);
 		}
 	}
 
-	private void registerAggregationReporter(MetricRegistry metricRegistry, MetricFilter allFilters,
-											 List<ScheduledReporter> onShutdownReporters, long reportingInterval) {
+	private void registerAggregationReporter(Metric2Registry metricRegistry,
+											 List<ScheduledMetrics2Reporter> onShutdownReporters, long reportingInterval) {
 		if (reportingInterval > 0) {
-			aggregationReporter = new MetricsAggregationReporter(metricRegistry, allFilters, onShutdownReporters);
+			aggregationReporter = MetricsAggregationReporter.forRegistry(metricRegistry).onShutdownReporters(onShutdownReporters).build();
 			aggregationReporter.start(reportingInterval, TimeUnit.SECONDS);
 			aggregationReporter.report();
 			reporters.add(aggregationReporter);
 		}
 	}
 
-	private void reportToGraphite(MetricRegistry metricRegistry, long reportingInterval,
-										 MeasurementSession measurementSession,
-										 MetricFilter filter) {
+	private void reportToGraphite(MetricRegistry metricRegistry, long reportingInterval, MeasurementSession measurementSession) {
 		String graphiteHostName = getGraphiteHostName();
 		if (isReportToGraphite()) {
 			final GraphiteReporter graphiteReporter = GraphiteReporter.forRegistry(metricRegistry)
 					.prefixedWith(getGraphitePrefix(measurementSession))
 					.convertRatesTo(TimeUnit.SECONDS)
 					.convertDurationsTo(TimeUnit.MILLISECONDS)
-					.filter(filter)
 					.build(new Graphite(new InetSocketAddress(graphiteHostName, getGraphitePort())));
 
 			graphiteReporter.start(reportingInterval, TimeUnit.SECONDS);
@@ -536,9 +493,9 @@ public class CorePlugin extends StagemonitorPlugin {
 
 		if (StringUtils.isNotEmpty(getInfluxDbUrl()) && reportingInterval > 0) {
 			logger.info("Sending metrics to InfluxDB ({}) every {}s", getInfluxDbUrl(), reportingInterval);
-			final InfluxDbReporter reporter = new InfluxDbReporter(metricRegistry, Metric2Filter.ALL,
-					TimeUnit.SECONDS,
-					TimeUnit.MILLISECONDS, measurementSession.asMap(), new HttpClient(), this);
+			final InfluxDbReporter reporter = InfluxDbReporter.forRegistry(metricRegistry, this)
+					.globalTags(measurementSession.asMap())
+					.build();
 
 			reporter.start(reportingInterval, TimeUnit.SECONDS);
 			reporters.add(reporter);
@@ -553,11 +510,11 @@ public class CorePlugin extends StagemonitorPlugin {
 			elasticsearchClient.sendBulkAsync("KibanaConfig.bulk");
 			logger.info("Sending metrics to Elasticsearch ({}) every {}s", getElasticsearchUrls(), reportingInterval);
 			final String mappingJson = ElasticsearchClient.requireBoxTypeHotIfHotColdAritectureActive(
-					"stagemonitor-elasticsearch-metrics-index-template.json", corePlugin.moveToColdNodesAfterDays.getValue());
+					metricsIndexTemplate.getValue(), corePlugin.moveToColdNodesAfterDays.getValue());
 			elasticsearchClient.sendMappingTemplateAsync(mappingJson, "stagemonitor-metrics");
-			final ElasticsearchReporter reporter = new ElasticsearchReporter(metricRegistry, Metric2Filter.ALL,
-					TimeUnit.SECONDS,
-					TimeUnit.MILLISECONDS, measurementSession.asMap(), new HttpClient(), this);
+			final ElasticsearchReporter reporter = ElasticsearchReporter.forRegistry(metricRegistry, this)
+					.globalTags(measurementSession.asMap())
+					.build();
 
 			reporter.start(reportingInterval, TimeUnit.SECONDS);
 			reporters.add(reporter);
@@ -575,24 +532,21 @@ public class CorePlugin extends StagemonitorPlugin {
 				sanitizeGraphiteMetricSegment(measurementSession.getHostName()));
 	}
 
-	private void reportToConsole(MetricRegistry metricRegistry, long reportingInterval, MetricFilter filter,
-										List<ScheduledReporter> onShutdownReporters) {
-		final SortedTableLogReporter reporter = SortedTableLogReporter.forRegistry(metricRegistry)
+	private SortedTableLogReporter reportToConsole(Metric2Registry metric2Registry, long reportingInterval, Metric2Filter filter) {
+		final SortedTableLogReporter reporter = SortedTableLogReporter.forRegistry(metric2Registry)
 				.convertRatesTo(TimeUnit.SECONDS)
 				.convertDurationsTo(TimeUnit.MILLISECONDS)
 				.filter(filter)
 				.build();
-		onShutdownReporters.add(reporter);
 		if (reportingInterval > 0) {
 			reporter.start(reportingInterval, TimeUnit.SECONDS);
 			reporters.add(reporter);
 		}
+		return reporter;
 	}
 
-	private void reportToJMX(MetricRegistry metricRegistry, MetricFilter filter) {
-		final JmxReporter reporter = JmxReporter.forRegistry(metricRegistry)
-				.filter(filter)
-				.build();
+	private void reportToJMX(MetricRegistry metricRegistry) {
+		final JmxReporter reporter = JmxReporter.forRegistry(metricRegistry).build();
 		reporter.start();
 		reporters.add(reporter);
 	}
@@ -618,6 +572,10 @@ public class CorePlugin extends StagemonitorPlugin {
 		getGrafanaClient().close();
 	}
 
+	public MeasurementSession getMeasurementSession() {
+		return Stagemonitor.getMeasurementSession();
+	}
+
 	public Metric2Registry getMetricRegistry() {
 		return metricRegistry;
 	}
@@ -640,6 +598,27 @@ public class CorePlugin extends StagemonitorPlugin {
 		this.elasticsearchClient = elasticsearchClient;
 	}
 
+	public static String getNameOfLocalHost() {
+		try {
+			return InetAddress.getLocalHost().getHostName();
+		} catch (Exception e) {
+			return getHostNameFromEnv();
+		}
+	}
+
+	static String getHostNameFromEnv() {
+		// try environment properties.
+		String host = System.getenv("COMPUTERNAME");
+		if (host != null) {
+			return host;
+		}
+		host = System.getenv("HOSTNAME");
+		if (host != null) {
+			return host;
+		}
+		return null;
+	}
+
 	public boolean isStagemonitorActive() {
 		return Stagemonitor.isDisabled() ? false : stagemonitorActive.getValue();
 	}
@@ -656,7 +635,7 @@ public class CorePlugin extends StagemonitorPlugin {
 		return reportingIntervalAggregation.getValue();
 	}
 
-	public boolean reportToJMX() {
+	public boolean isReportToJMX() {
 		return reportingJmx.getValue();
 	}
 
@@ -678,6 +657,10 @@ public class CorePlugin extends StagemonitorPlugin {
 
 	public String getInstanceName() {
 		return instanceName.getValue();
+	}
+
+	public String getHostName() {
+		return hostName.getValue();
 	}
 
 	/**
@@ -706,7 +689,7 @@ public class CorePlugin extends StagemonitorPlugin {
 		return deactivateStagemonitorIfEsConfigSourceIsDown.getValue();
 	}
 
-	public Collection<Pattern> getExcludedMetricsPatterns() {
+	public Collection<MetricName> getExcludedMetricsPatterns() {
 		return excludedMetrics.getValue();
 	}
 
@@ -780,5 +763,9 @@ public class CorePlugin extends StagemonitorPlugin {
 
 	public boolean isOnlyLogElasticsearchMetricReports() {
 		return onlyLogElasticsearchMetricReports.getValue();
+	}
+
+	public boolean isDebugInstrumentation() {
+		return debugInstrumentation.getValue();
 	}
 }

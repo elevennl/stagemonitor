@@ -2,8 +2,10 @@ package org.stagemonitor.core.configuration;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
+import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.Arrays;
@@ -32,6 +34,7 @@ public class ConfigurationOptionTest {
 	private final ConfigurationOption<Boolean> booleanFalse = ConfigurationOption.booleanOption().key("boolean.false").build();
 	private final ConfigurationOption<Boolean> booleanInvalid = ConfigurationOption.booleanOption().key("boolean.invalid").build();
 	private final ConfigurationOption<String> testCaching = ConfigurationOption.stringOption().key("testCaching").build();
+	private final ConfigurationOption<String> testUpdate = ConfigurationOption.stringOption().key("testUpdate").dynamic(true).build();
 	private Configuration configuration = new Configuration(StagemonitorPlugin.class);
 	private CorePlugin corePlugin;
 	private SimpleSource configSource = SimpleSource
@@ -58,8 +61,8 @@ public class ConfigurationOptionTest {
 		registerPluginConfiguration.setAccessible(true);
 		registerPluginConfiguration.invoke(configuration, new StagemonitorPlugin() {
 			public List<ConfigurationOption<?>> getConfigurationOptions() {
-				return Arrays.<ConfigurationOption<?>>asList(invalidPatternMap, invalidPatternSyntax, aLong, invalidLong, string,
-						lowerStrings, strings, booleanTrue, booleanFalse, booleanInvalid, testCaching);
+				return Arrays.asList(invalidPatternMap, invalidPatternSyntax, aLong, invalidLong, string,
+						lowerStrings, strings, booleanTrue, booleanFalse, booleanInvalid, testCaching, testUpdate);
 			}
 		});
 	}
@@ -119,12 +122,18 @@ public class ConfigurationOptionTest {
 	@Test
 	public void testDefaultValues() {
 		assertEquals(0L, corePlugin.getConsoleReportingInterval());
-		assertEquals(true, corePlugin.reportToJMX());
+		assertEquals(false, corePlugin.isReportToJMX());
 		assertEquals(60, corePlugin.getGraphiteReportingInterval());
 		assertEquals(null, corePlugin.getGraphiteHostName());
 		assertEquals(2003, corePlugin.getGraphitePort());
 		assertEquals(null, corePlugin.getApplicationName());
 		assertEquals(null, corePlugin.getInstanceName());
-		assertEquals(Collections.<Pattern>emptyList(), corePlugin.getExcludedMetricsPatterns());
+	}
+
+	@Test
+	public void testUpdate() throws IOException {
+		assertNull(testUpdate.getValue());
+		testUpdate.update("updated!", "Test Configuration Source");
+		assertEquals("updated!", testUpdate.getValue());
 	}
 }

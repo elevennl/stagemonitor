@@ -77,7 +77,6 @@ public class ExceptionMeteredInstrumenterTest {
 	@Before
 	@After
 	public void clearMetricRegistry() {
-		ExceptionMeteredInstrumenter.init();
 		Stagemonitor.getMetric2Registry().removeMatching(MetricFilter.ALL);
 	}
 
@@ -165,7 +164,7 @@ public class ExceptionMeteredInstrumenterTest {
 			// ignore
 		}
 		final Metric2Registry metricRegistry = Stagemonitor.getMetric2Registry();
-		assertEquals(0, metricRegistry.getMeters().size());
+		assertEquals(metricRegistry.getMeters().toString(), 0, metricRegistry.getMeters().size());
 	}
 
 	@Test

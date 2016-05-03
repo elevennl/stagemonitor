@@ -24,31 +24,34 @@ buildscript {
     }
 
     dependencies {
-        classpath 'net.saliman:gradle-cobertura-plugin:2.2.8'
-        classpath 'org.kt3k.gradle.plugin:coveralls-gradle-plugin:2.0.0'
+        classpath 'net.saliman:gradle-cobertura-plugin:2.3.0'
+        classpath 'org.kt3k.gradle.plugin:coveralls-gradle-plugin:2.6.3'
         classpath 'com.bmuschko:gradle-nexus-plugin:2.3.1'
-        classpath 'com.github.jengelman.gradle.plugins:shadow:1.2.2'
-        classpath 'com.github.ben-manes:gradle-versions-plugin:0.11.3'
+        classpath 'com.github.ben-manes:gradle-versions-plugin:0.12.0'
     }
 }
 
 plugins {
-    id 'net.researchgate.release' version '2.3.4'
+    id 'net.researchgate.release' version '2.3.5'
 }
 
 apply plugin: 'idea'
 apply plugin: 'eclipse'
-apply plugin: 'cobertura'
-apply plugin: 'com.github.kt3k.coveralls'
 apply plugin: 'com.github.ben-manes.versions'
+apply plugin: 'java'
 apply plugin: 'com.bmuschko.nexus'
+
+if (!System.getProperty("java.version").startsWith("1.6.")) {
+    apply plugin: 'cobertura'
+    apply plugin: 'com.github.kt3k.coveralls'
+}
 
 ext {
     metricsVersion = '3.1.2'
-    slf4jVersion = '1.7.13'
-    jacksonVersion = '2.6.4'
-    esVersion = '1.6.0'
-    javassistVersion = '3.20.0-GA'
+    slf4jVersion = '1.7.18'
+    jacksonVersion = '2.7.2'
+    esVersion = '2.2.0'
+    byteBuddyVersion = '1.3.19'
 }
 
 subprojects {
@@ -57,12 +60,22 @@ subprojects {
     apply plugin: 'idea'
     apply plugin: 'eclipse'
     apply plugin: 'java'
-    apply plugin: 'cobertura'
-    apply plugin: 'com.github.johnrengelman.shadow'
-    apply plugin: 'com.bmuschko.nexus'
+    if (!System.getProperty("java.version").startsWith("1.6.")) {
+        apply plugin: 'cobertura'
+    }
 
     if (!project.name.contains("benchmark") && !project.name.contains("byte-buddy")) {
+        apply plugin: 'osgi'
         apply from: "$rootDir/gradle/publish-maven.gradle"
+
+        jar {
+            manifest {
+                attributes("Implementation-Version": version)
+                instruction 'Bundle-Vendor', 'iSYS Software GmbH'
+                instruction 'Bundle-Description', 'Open source performance monitoring'
+                instruction 'Bundle-DocURL', 'http://www.stagemonitor.org'
+            }
+        }
     }
 
     configurations {
@@ -71,9 +84,6 @@ subprojects {
 
         optional
         compile.extendsFrom optional
-
-        shade
-        compile.extendsFrom shade
     }
 
     repositories {
@@ -82,8 +92,8 @@ subprojects {
 
     dependencies {
         testCompile 'junit:junit:4.12'
-        testCompile 'org.mockito:mockito-all:1.10.19'
-        testCompile 'ch.qos.logback:logback-classic:1.1.3'
+        testCompile 'org.mockito:mockito-all:2.0.2-beta'
+        testCompile 'ch.qos.logback:logback-classic:1.1.6'
     }
 
     test.testLogging.exceptionFormat = 'full'
@@ -95,30 +105,25 @@ subprojects {
         options.debugOptions.debugLevel = "source,lines,vars"
     }
 
+    compileTestJava {
+        options.debugOptions.debugLevel = "source,lines,vars"
+    }
+
     tasks.withType(JavaCompile) {
         options.encoding = 'UTF-8'
         options.incremental = true
     }
 
-    cobertura {
-        coverageFormats = []
-        coverageIgnoreTrivial = true
+    if (!System.getProperty("java.version").startsWith("1.6.")) {
+        cobertura {
+            coverageFormats = []
+            coverageIgnoreTrivial = true
+        }
     }
 
     javadoc {
         if (JavaVersion.current().isJava8Compatible()) {
             options.addStringOption('Xdoclint:none', '-quiet')
-        }
-    }
-
-    task copyToLib(type: Copy) {
-        into "$buildDir/libs/lib"
-        from configurations.runtime - configurations.provided
-    }
-
-    jar {
-        manifest {
-            attributes("Implementation-Version": version)
         }
     }
 
@@ -128,33 +133,14 @@ subprojects {
         snapshotRepositoryUrl = nexusBaseUrl + '/content/repositories/snapshots/'
     }
 
+    task copyToLib( type: Copy ) {
+        into "$buildDir/libs/lib"
+        from configurations.runtime - configurations.provided
+    }
+
 }
 
-// Needed to prevent adding 'timestamp' to the versions
-// added to nexus.
-//project.afterEvaluate {
-//    uploadArchives {
-//        repositories {
-//            mavenDeployer {
-//                uniqueVersion = false
-//            }
-//        }
-//    }
-//}
-//
-//// Needed to prevent adding 'timestamp' to the versions
-//// added to nexus for all the subprojects.
-//subprojects {subProject ->
-//    afterEvaluate{
-//        uploadArchives {
-//            repositories {
-//                mavenDeployer {
-//                    uniqueVersion = false
-//                }
-//            }
-//        }
-//    }
-//}
+
 
 release {
     preTagCommitMessage = 'release '
@@ -165,25 +151,24 @@ release {
     }
 }
 
-nexus {
-    sign = false
-    repositoryUrl = nexusBaseUrl + '/content/repositories/releases/nl/eleven/'
-    snapshotRepositoryUrl = nexusBaseUrl + '/content/repositories/snapshots/nl/eleven/'
-}
-
 def getProjectsToTest() {
     subprojects.findAll { !(it.toString() =~ "benchmark|buddy") }
 }
 
 test.dependsOn << projectsToTest*.tasks*.withType(Test).flatten()
 
-cobertura {
-    coverageMergeDatafiles = projectsToTest.collect { file("${it.buildDir.path}/cobertura/cobertura.ser") }
-    coverageFormats = ['html', 'xml']
-    coverageIgnoreTrivial = true
-    coverageSourceDirs = [projectsToTest.sourceSets.main.java.srcDirs.flatten()]
+if (!System.getProperty("java.version").startsWith("1.6.")) {
+    cobertura {
+        coverageMergeDatafiles =  projectsToTest.collect { file("${it.buildDir.path}/cobertura/cobertura.ser") }
+        coverageFormats = ['html', 'xml']
+        coverageIgnoreTrivial = true
+        coverageSourceDirs = [ projectsToTest.sourceSets.main.java.srcDirs.flatten() ]
+    }
 }
 
 task wrapper(type: Wrapper) {
-    gradleVersion = "2.5"
+    gradleVersion = "2.12"
 }
+
+task install
+install.dependsOn subprojects.compileJava

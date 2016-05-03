@@ -80,6 +80,31 @@ public class Metric2Registry implements Metric2Set {
 			register(entry.getKey(), entry.getValue());
 		}
 	}
+	
+	/**
+	 * Given a metric set, registers the ones not already registered.
+	 * This method prevents IllegalArgumentException
+	 * @param metrics a set of metrics
+	 */
+	public void registerAny(Metric2Set metrics) {
+		for (Map.Entry<MetricName, Metric> entry : metrics.getMetrics().entrySet()) {
+			registerNewMetrics(entry.getKey(), entry.getValue());
+		}
+	}
+
+	/**
+	 * Only registers the metric if it is not already registered
+	 * @param name   the name of the metric
+	 * @param metric the metric
+	 */
+	public void registerNewMetrics(MetricName name, Metric metric) {
+		final Set<MetricName> registeredNames = getNames();
+		if (!registeredNames.contains(name)) {
+			try {
+				register(name, metric);
+			} catch (IllegalArgumentException e){/* exception due to race condition*/}
+		}
+	}
 
 	/**
 	 * Return the {@link Counter} registered under this name; or create and register

@@ -17,7 +17,6 @@ import javax.servlet.DispatcherType;
 import javax.servlet.FilterRegistration;
 import javax.servlet.ServletContainerInitializer;
 import javax.servlet.ServletContext;
-import javax.servlet.ServletException;
 import javax.servlet.ServletRegistration;
 import javax.servlet.http.HttpServletRequest;
 
@@ -31,7 +30,6 @@ import org.stagemonitor.core.configuration.ConfigurationOption;
 import org.stagemonitor.core.configuration.converter.SetValueConverter;
 import org.stagemonitor.core.elasticsearch.ElasticsearchClient;
 import org.stagemonitor.core.grafana.GrafanaClient;
-import org.stagemonitor.core.metrics.metrics2.Metric2Registry;
 import org.stagemonitor.core.util.ClassUtils;
 import org.stagemonitor.core.util.StringUtils;
 import org.stagemonitor.web.configuration.ConfigurationServlet;
@@ -40,9 +38,8 @@ import org.stagemonitor.web.metrics.StagemonitorMetricsServlet;
 import org.stagemonitor.web.monitor.MonitoredHttpRequest;
 import org.stagemonitor.web.monitor.filter.HttpRequestMonitorFilter;
 import org.stagemonitor.web.monitor.filter.StagemonitorSecurityFilter;
-import org.stagemonitor.web.monitor.filter.UserNameFilter;
 import org.stagemonitor.web.monitor.rum.RumServlet;
-import org.stagemonitor.web.monitor.servlet.FileServlet;
+import org.stagemonitor.web.monitor.servlet.StagemonitorFileServlet;
 import org.stagemonitor.web.monitor.widget.RequestTraceServlet;
 import org.stagemonitor.web.monitor.widget.WidgetServlet;
 import org.stagemonitor.web.session.SessionCounter;
@@ -62,15 +59,16 @@ public class WebPlugin extends StagemonitorPlugin implements ServletContainerIni
 	private final ConfigurationOption<Collection<Pattern>> requestParamsConfidential = ConfigurationOption.regexListOption()
 			.key("stagemonitor.requestmonitor.http.requestparams.confidential.regex")
 			.dynamic(true)
-			.label("Confidential request parameters (regex)")
-			.description("A list of request parameter name patterns that should not be collected.\n" +
+			.label("Deprecated: Confidential request parameters (regex)")
+			.description("Deprecated, use stagemonitor.requestmonitor.requestparams.confidential.regex instead." +
+					"A list of request parameter name patterns that should not be collected.\n" +
 					"A request parameter is either a query string or a application/x-www-form-urlencoded request " +
 					"body (POST form content)")
 			.defaultValue(Arrays.asList(
 					Pattern.compile("(?i).*pass.*"),
 					Pattern.compile("(?i).*credit.*"),
 					Pattern.compile("(?i).*pwd.*")))
-			.tags("security-relevant")
+			.tags("security-relevant", "deprecated")
 			.configurationCategory(WEB_PLUGIN)
 			.build();
 	private ConfigurationOption<Boolean> collectHttpHeaders = ConfigurationOption.booleanOption()
@@ -231,11 +229,22 @@ public class WebPlugin extends StagemonitorPlugin implements ServletContainerIni
 			}})
 			.configurationCategory(WEB_PLUGIN)
 			.build();
+	private ConfigurationOption<Boolean> honorDoNotTrackHeader = ConfigurationOption.booleanOption()
+			.key("stagemonitor.web.honorDoNotTrackHeader")
+			.dynamic(true)
+			.label("Honor do not track header")
+			.description("When set to true, requests that include the dnt header won't be reported. " +
+					"Depending on your use case you might not be required to stop reporting request traces even " +
+					"if dnt is set. See https://tools.ietf.org/html/draft-mayer-do-not-track-00#section-9.3")
+			.defaultValue(false)
+			.tags("privacy")
+			.configurationCategory(WEB_PLUGIN)
+			.build();
 
 	@Override
-	public void initializePlugin(Metric2Registry registry, Configuration config) {
-		registerPooledResources(registry, tomcatThreadPools());
-		final CorePlugin corePlugin = config.getConfig(CorePlugin.class);
+	public void initializePlugin(StagemonitorPlugin.InitArguments initArguments) {
+		registerPooledResources(initArguments.getMetricRegistry(), tomcatThreadPools());
+		final CorePlugin corePlugin = initArguments.getPlugin(CorePlugin.class);
 		ElasticsearchClient elasticsearchClient = corePlugin.getElasticsearchClient();
 		if (corePlugin.isReportToGraphite()) {
 			elasticsearchClient.sendGrafana1DashboardAsync("grafana/Grafana1GraphiteServer.json");
@@ -353,15 +362,19 @@ public class WebPlugin extends StagemonitorPlugin implements ServletContainerIni
 		return requestExceptionAttributes.getValue();
 	}
 
+	public boolean isHonorDoNotTrackHeader() {
+		return honorDoNotTrackHeader.getValue();
+	}
+
 	@Override
-	public void onStartup(Set<Class<?>> c, ServletContext ctx) throws ServletException {
+	public void onStartup(Set<Class<?>> c, ServletContext ctx) {
 		ctx.addServlet(ConfigurationServlet.class.getSimpleName(), new ConfigurationServlet())
 				.addMapping(ConfigurationServlet.CONFIGURATION_ENDPOINT);
 		ctx.addServlet(StagemonitorMetricsServlet.class.getSimpleName(), new StagemonitorMetricsServlet())
 				.addMapping("/stagemonitor/metrics");
 		ctx.addServlet(RumServlet.class.getSimpleName(), new RumServlet())
 				.addMapping("/stagemonitor/public/rum");
-		ctx.addServlet(FileServlet.class.getSimpleName(), new FileServlet())
+		ctx.addServlet(StagemonitorFileServlet.class.getSimpleName(), new StagemonitorFileServlet())
 				.addMapping("/stagemonitor/static/*", "/stagemonitor/public/static/*");
 		ctx.addServlet(WidgetServlet.class.getSimpleName(), new WidgetServlet())
 				.addMapping("/stagemonitor");
@@ -382,12 +395,11 @@ public class WebPlugin extends StagemonitorPlugin implements ServletContainerIni
 		monitorFilter.addMappingForUrlPatterns(EnumSet.of(DispatcherType.REQUEST, DispatcherType.FORWARD), false, "/*");
 		monitorFilter.setAsyncSupported(true);
 
-		final FilterRegistration.Dynamic userFilter = ctx.addFilter(UserNameFilter.class.getSimpleName(), new UserNameFilter());
-		// Have this filter run last because user information may be populated by other filters e.g. Spring Security
-		userFilter.addMappingForUrlPatterns(EnumSet.of(DispatcherType.REQUEST, DispatcherType.FORWARD), true, "/*");
-		userFilter.setAsyncSupported(true);
-
 		ctx.addListener(MDCListener.class);
-		ctx.addListener(SessionCounter.class);
+		try {
+			ctx.addListener(SessionCounter.class);
+		} catch (IllegalArgumentException e) {
+			// embedded servlet containers like jetty don't necessarily support sessions
+		}
 	}
 }

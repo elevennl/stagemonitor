@@ -10,12 +10,13 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
-import static org.stagemonitor.core.metrics.MetricsReporterTestHelper.map;
 import static org.stagemonitor.core.metrics.MetricsReporterTestHelper.timer;
 
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.SortedMap;
+import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
@@ -24,6 +25,7 @@ import com.codahale.metrics.Counter;
 import com.codahale.metrics.Gauge;
 import com.codahale.metrics.Histogram;
 import com.codahale.metrics.Meter;
+import com.codahale.metrics.Timer;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
@@ -41,7 +43,6 @@ import org.stagemonitor.alerting.incident.IncidentRepository;
 import org.stagemonitor.core.CorePlugin;
 import org.stagemonitor.core.MeasurementSession;
 import org.stagemonitor.core.configuration.Configuration;
-import org.stagemonitor.core.metrics.MetricsReporterTestHelper;
 import org.stagemonitor.core.metrics.metrics2.Metric2Registry;
 import org.stagemonitor.core.util.JsonUtils;
 
@@ -84,15 +85,16 @@ public class ThresholdMonitoringReporterTest {
 
 		checkMetrics();
 
-		ArgumentCaptor<Incident> incident = ArgumentCaptor.forClass(Incident.class);
-		verify(alerter).alert(incident.capture(), any(Subscription.class));
-		assertEquals(check.getId(), incident.getValue().getCheckId());
-		assertEquals("Test Timer", incident.getValue().getCheckName());
-		assertEquals(CheckResult.Status.OK, incident.getValue().getOldStatus());
-		assertEquals(CheckResult.Status.WARN, incident.getValue().getNewStatus());
+		ArgumentCaptor<Alerter.AlertArguments> alertArguments = ArgumentCaptor.forClass(Alerter.AlertArguments.class);
+		verify(alerter).alert(alertArguments.capture());
+		final Incident incident = alertArguments.getValue().getIncident();
+		assertEquals(check.getId(), incident.getCheckId());
+		assertEquals("Test Timer", incident.getCheckName());
+		assertEquals(CheckResult.Status.OK, incident.getOldStatus());
+		assertEquals(CheckResult.Status.WARN, incident.getNewStatus());
 
-		assertEquals(1, incident.getValue().getCheckResults().size());
-		List<CheckResult> checkResults = incident.getValue().getCheckResults().iterator().next().getResults();
+		assertEquals(1, incident.getCheckResults().size());
+		List<CheckResult> checkResults = incident.getCheckResults().iterator().next().getResults();
 		assertEquals(2, checkResults.size());
 
 		CheckResult result = checkResults.get(0);
@@ -108,11 +110,11 @@ public class ThresholdMonitoringReporterTest {
 		when(alertingPlugin.getChecks()).thenReturn(Collections.singletonMap(check.getId(), check));
 
 		checkMetrics();
-		verify(alerter, times(0)).alert(any(Incident.class), any(Subscription.class));
+		verify(alerter, times(0)).alert(any(Alerter.AlertArguments.class));
 		verify(incidentRepository).createIncident(any(Incident.class));
 
 		checkMetrics();
-		verify(alerter).alert(any(Incident.class), any(Subscription.class));
+		verify(alerter).alert(any(Alerter.AlertArguments.class));
 		verify(incidentRepository).updateIncident(any(Incident.class));
 	}
 
@@ -123,7 +125,7 @@ public class ThresholdMonitoringReporterTest {
 
 		// violation
 		checkMetrics(7, 0, 0);
-		verify(alerter, times(0)).alert(any(Incident.class), any(Subscription.class));
+		verify(alerter, times(0)).alert(any(Alerter.AlertArguments.class));
 		final Incident incident = incidentRepository.getIncidentByCheckId(check.getId());
 		assertNotNull(incident);
 		assertEquals(CheckResult.Status.OK, incident.getOldStatus());
@@ -135,7 +137,7 @@ public class ThresholdMonitoringReporterTest {
 
 		// back to ok
 		checkMetrics(1, 0, 0);
-		verify(alerter, times(0)).alert(any(Incident.class), any(Subscription.class));
+		verify(alerter, times(0)).alert(any(Alerter.AlertArguments.class));
 		assertNull(incidentRepository.getIncidentByCheckId(check.getId()));
 	}
 
@@ -146,7 +148,7 @@ public class ThresholdMonitoringReporterTest {
 
 		// violation
 		checkMetrics(7, 0, 0);
-		verify(alerter, times(1)).alert(any(Incident.class), any(Subscription.class));
+		verify(alerter, times(1)).alert(any(Alerter.AlertArguments.class));
 		Incident incident = incidentRepository.getIncidentByCheckId(check.getId());
 		assertNotNull(incident);
 		assertEquals(CheckResult.Status.OK, incident.getOldStatus());
@@ -158,9 +160,9 @@ public class ThresholdMonitoringReporterTest {
 
 		// back to ok
 		checkMetrics(1, 0, 0);
-		ArgumentCaptor<Incident> incidentArgumentCaptor = ArgumentCaptor.forClass(Incident.class);
-		verify(alerter, times(2)).alert(incidentArgumentCaptor.capture(), any(Subscription.class));
-		incident = incidentArgumentCaptor.getValue();
+		ArgumentCaptor<Alerter.AlertArguments> alertArguments = ArgumentCaptor.forClass(Alerter.AlertArguments.class);
+		verify(alerter, times(2)).alert(alertArguments.capture());
+		incident = alertArguments.getValue().getIncident();
 		assertNotNull(incident);
 		assertEquals(CheckResult.Status.WARN, incident.getOldStatus());
 		assertEquals(CheckResult.Status.OK, incident.getNewStatus());
@@ -177,7 +179,7 @@ public class ThresholdMonitoringReporterTest {
 						Arrays.asList(new CheckResult("test", 10, CheckResult.Status.CRITICAL))));
 
 		checkMetrics(7, 0, 0);
-		verify(alerter, times(0)).alert(any(Incident.class), any(Subscription.class));
+		verify(alerter, times(0)).alert(any(Alerter.AlertArguments.class));
 		verify(incidentRepository).updateIncident(any(Incident.class));
 		Incident storedIncident = incidentRepository.getIncidentByCheckId(check.getId());
 		assertEquals(CheckResult.Status.CRITICAL, storedIncident.getOldStatus());
@@ -199,7 +201,7 @@ public class ThresholdMonitoringReporterTest {
 		System.out.println(JsonUtils.toJson(storedIncident));
 
 		checkMetrics(1, 0, 0);
-		verify(alerter, times(0)).alert(any(Incident.class), any(Subscription.class));
+		verify(alerter, times(0)).alert(any(Alerter.AlertArguments.class));
 		verify(incidentRepository, times(0)).deleteIncident(any(Incident.class));
 		verify(incidentRepository, times(2)).updateIncident(any(Incident.class));
 
@@ -226,15 +228,17 @@ public class ThresholdMonitoringReporterTest {
 	}
 
 	private void checkMetrics(long timer1Mean, long timer2Mean, long timer3Mean) {
+		final SortedMap<String, Timer> timers = new TreeMap<String, Timer>();
+		timers.put("test.timer1", timer(TimeUnit.MILLISECONDS.toNanos(timer1Mean)));
+		timers.put("test.timer2", timer(TimeUnit.MILLISECONDS.toNanos(timer2Mean)));
+		timers.put("test.timer3", timer(TimeUnit.MILLISECONDS.toNanos(timer3Mean)));
+		timers.put("test.some.other.timer", timer(TimeUnit.MILLISECONDS.toNanos(999)));
 		thresholdMonitoringReporter.report(
-				MetricsReporterTestHelper.<Gauge>map(),
-				MetricsReporterTestHelper.<Counter>map(),
-				MetricsReporterTestHelper.<Histogram>map(),
-				MetricsReporterTestHelper.<Meter>map(),
-				map("test.timer1", timer(TimeUnit.MILLISECONDS.toNanos(timer1Mean)))
-						.add("test.timer2", timer(TimeUnit.MILLISECONDS.toNanos(timer2Mean)))
-						.add("test.timer3", timer(TimeUnit.MILLISECONDS.toNanos(timer3Mean)))
-						.add("test.some.other.timer", timer(TimeUnit.MILLISECONDS.toNanos(999)))
+				new TreeMap<String, Gauge>(),
+				new TreeMap<String, Counter>(),
+				new TreeMap<String, Histogram>(),
+				new TreeMap<String, Meter>(),
+				timers
 		);
 	}
 }

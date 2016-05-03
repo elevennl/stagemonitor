@@ -12,8 +12,6 @@ import com.fasterxml.jackson.annotation.JsonAnySetter;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.stagemonitor.core.MeasurementSession;
 import org.stagemonitor.core.Stagemonitor;
 import org.stagemonitor.core.util.JsonUtils;
@@ -26,7 +24,8 @@ import org.stagemonitor.requestmonitor.profiler.CallStackElement;
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public class RequestTrace {
 
-	private final Logger logger = LoggerFactory.getLogger(getClass());
+	@JsonIgnore
+	private final RequestMonitorPlugin requestMonitorPlugin;
 
 	private final String id;
 	private String name;
@@ -51,14 +50,19 @@ public class RequestTrace {
 	private String exceptionClass;
 	private String exceptionStackTrace;
 	private String username;
+	private String disclosedUserName;
 	private String clientIp;
+	private String uniqueVisitorId;
 	private Map<String, Object> customProperties = new HashMap<String, Object>();
+	@JsonIgnore
+	private Map<String, Object> requestAttributes = new HashMap<String, Object>();
 
 	public RequestTrace(String requestId) {
-		this(requestId, Stagemonitor.getMeasurementSession());
+		this(requestId, Stagemonitor.getMeasurementSession(), Stagemonitor.getPlugin(RequestMonitorPlugin.class));
 	}
 
-	public RequestTrace(String requestId, MeasurementSession measurementSession) {
+	public RequestTrace(String requestId, MeasurementSession measurementSession, RequestMonitorPlugin requestMonitorPlugin) {
+		this.requestMonitorPlugin = requestMonitorPlugin;
 		this.id = requestId != null ? requestId : UUID.randomUUID().toString();
 		this.measurementStart = measurementSession.getStartTimestamp();
 		this.application = measurementSession.getApplicationName();
@@ -188,28 +192,44 @@ public class RequestTrace {
 	}
 
 	public void setException(Exception e) {
-		error = e != null;
-		if (e != null) {
-			exceptionMessage = e.getMessage();
-			exceptionClass = e.getClass().getCanonicalName();
-
-			StringWriter sw = new StringWriter();
-			PrintWriter pw = new PrintWriter(sw, true);
-			e.printStackTrace(pw);
-			exceptionStackTrace = sw.getBuffer().toString();
+		if (e == null || requestMonitorPlugin.getIgnoreExceptions().contains(e.getClass().getName())) {
+			return;
 		}
-	}
+		error = true;
+		Throwable throwable = e;
+		if (requestMonitorPlugin.getUnnestExceptions().contains(throwable.getClass().getName())) {
+			Throwable cause = throwable.getCause();
+			if (cause != null) {
+				throwable = cause;
+			}
+		}
+		exceptionMessage = throwable.getMessage();
+		exceptionClass = throwable.getClass().getCanonicalName();
 
-	public String getUsername() {
-		return username;
+		StringWriter sw = new StringWriter();
+		PrintWriter pw = new PrintWriter(sw, true);
+		throwable.printStackTrace(pw);
+		exceptionStackTrace = sw.getBuffer().toString();
 	}
 
 	public void setUsername(String username) {
 		this.username = username;
 	}
 
+	void setDisclosedUserName(String disclosedUserName) {
+		this.disclosedUserName = disclosedUserName;
+	}
+
 	public void setClientIp(String clientIp) {
 		this.clientIp = clientIp;
+	}
+
+	public String getUsername() {
+		return username;
+	}
+
+	public String getDisclosedUserName() {
+		return disclosedUserName;
 	}
 
 	public String getClientIp() {
@@ -291,4 +311,31 @@ public class RequestTrace {
 		customProperties.put(key, value);
 	}
 
+	/**
+	 * Adds an attribute to the request which can later be retrieved by {@link #getRequestAttribute(String)}
+	 * <p/>
+	 * The attributes won't be reported
+	 * @param key
+	 * @param value
+	 */
+	public void addRequestAttribute(String key, Object value) {
+		requestAttributes.put(key, value);
+	}
+
+	public Object getRequestAttribute(String key) {
+		return requestAttributes.get(key);
+	}
+
+	public String getUniqueVisitorId() {
+		return uniqueVisitorId;
+	}
+
+	public void setUniqueVisitorId(String uniqueVisitorId) {
+		this.uniqueVisitorId = uniqueVisitorId;
+	}
+
+	@Override
+	public void finalize() {
+		callStack.recycle();
+	}
 }

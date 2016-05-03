@@ -1,15 +1,14 @@
 package org.stagemonitor.alerting;
 
-import java.util.Arrays;
+import java.io.IOException;
 import java.util.Collections;
-import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 import javax.servlet.ServletContainerInitializer;
 import javax.servlet.ServletContext;
-import javax.servlet.ServletException;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import org.slf4j.Logger;
@@ -20,6 +19,7 @@ import org.stagemonitor.alerting.alerter.AlerterTypeServlet;
 import org.stagemonitor.alerting.alerter.IncidentServlet;
 import org.stagemonitor.alerting.alerter.Subscription;
 import org.stagemonitor.alerting.alerter.TestAlertSenderServlet;
+import org.stagemonitor.alerting.annotation.SlaCheckCreatingClassPathScanner;
 import org.stagemonitor.alerting.check.Check;
 import org.stagemonitor.alerting.incident.ConcurrentMapIncidentRepository;
 import org.stagemonitor.alerting.incident.ElasticsearchIncidentRepository;
@@ -27,11 +27,10 @@ import org.stagemonitor.alerting.incident.IncidentRepository;
 import org.stagemonitor.core.CorePlugin;
 import org.stagemonitor.core.Stagemonitor;
 import org.stagemonitor.core.StagemonitorPlugin;
-import org.stagemonitor.core.configuration.Configuration;
 import org.stagemonitor.core.configuration.ConfigurationOption;
-import org.stagemonitor.core.metrics.metrics2.Metric2Registry;
+import org.stagemonitor.core.configuration.source.SimpleSource;
 
-public class AlertingPlugin extends StagemonitorPlugin implements ServletContainerInitializer {
+public class AlertingPlugin extends StagemonitorPlugin {
 
 	private final Logger logger = LoggerFactory.getLogger(getClass());
 
@@ -53,7 +52,7 @@ public class AlertingPlugin extends StagemonitorPlugin implements ServletContain
 			.defaultValue(60L)
 			.configurationCategory(ALERTING_PLUGIN_NAME)
 			.build();
-	public final ConfigurationOption<Map<String, Subscription>> subscriptions = ConfigurationOption
+	private final ConfigurationOption<Map<String, Subscription>> subscriptions = ConfigurationOption
 			.jsonOption(new TypeReference<Map<String, Subscription>>() {}, Map.class)
 			.key("stagemonitor.alerts.subscriptions")
 			.dynamic(true)
@@ -62,7 +61,7 @@ public class AlertingPlugin extends StagemonitorPlugin implements ServletContain
 			.defaultValue(Collections.<String, Subscription>emptyMap())
 			.configurationCategory(ALERTING_PLUGIN_NAME)
 			.build();
-	public final ConfigurationOption<Map<String, Check>> checks = ConfigurationOption
+	private final ConfigurationOption<Map<String, Check>> checks = ConfigurationOption
 			.jsonOption(new TypeReference<Map<String, Check>>() {}, Map.class)
 			.key("stagemonitor.alerts.checks")
 			.dynamic(true)
@@ -181,7 +180,7 @@ public class AlertingPlugin extends StagemonitorPlugin implements ServletContain
 					"</#if>\n" +
 					"Old status: ${incident.oldStatus!'OK'}\n" +
 					"New status: ${incident.newStatus}\n" +
-					"<#if incident.failedChecks gt 0>" + 
+					"<#if incident.failedChecks gt 0>" +
 					"Failing check<#if incident.failedChecks gt 1>s</#if>: ${incident.failedChecks}\n" +
 					"Hosts: ${incident.hosts?join(\", \")}\n" +
 					"Instances: ${incident.instances?join(\", \")}\n" +
@@ -217,10 +216,10 @@ public class AlertingPlugin extends StagemonitorPlugin implements ServletContain
 	private ThresholdMonitoringReporter thresholdMonitoringReporter;
 
 	@Override
-	public void initializePlugin(Metric2Registry metricRegistry, Configuration configuration) throws Exception {
-		final AlertingPlugin alertingPlugin = configuration.getConfig(AlertingPlugin.class);
-		alertSender = new AlertSender(configuration);
-		CorePlugin corePlugin = configuration.getConfig(CorePlugin.class);
+	public void initializePlugin(StagemonitorPlugin.InitArguments initArguments) throws Exception {
+		final AlertingPlugin alertingPlugin = initArguments.getPlugin(AlertingPlugin.class);
+		alertSender = new AlertSender(initArguments.getConfiguration());
+		CorePlugin corePlugin = initArguments.getPlugin(CorePlugin.class);
 		if (corePlugin.getElasticsearchUrl() != null) {
 			incidentRepository = new ElasticsearchIncidentRepository(corePlugin.getElasticsearchClient());
 		} else {
@@ -228,8 +227,9 @@ public class AlertingPlugin extends StagemonitorPlugin implements ServletContain
 		}
 		logger.info("Using {} for storing incidents.", incidentRepository.getClass().getSimpleName());
 
-		thresholdMonitoringReporter = new ThresholdMonitoringReporter(metricRegistry, alertingPlugin, alertSender, incidentRepository, Stagemonitor.getMeasurementSession());
+		thresholdMonitoringReporter = new ThresholdMonitoringReporter(initArguments.getMetricRegistry(), alertingPlugin, alertSender, incidentRepository, initArguments.getMeasurementSession());
 		thresholdMonitoringReporter.start(alertingPlugin.checkFrequency.getValue(), TimeUnit.SECONDS);
+		SlaCheckCreatingClassPathScanner.onStart(initArguments.getMeasurementSession());
 	}
 
 	@Override
@@ -238,8 +238,8 @@ public class AlertingPlugin extends StagemonitorPlugin implements ServletContain
 	}
 
 	@Override
-	public List<String> getPathsOfWidgetTabPlugins() {
-		return Arrays.asList("/stagemonitor/static/tabs/alert/alerting-tab");
+	public void registerWidgetTabPlugins(WidgetTabPluginsRegistry widgetTabPluginsRegistry) {
+		widgetTabPluginsRegistry.addWidgetTabPlugin("/stagemonitor/static/tabs/alert/alerting-tab");
 	}
 
 	public boolean isMuteAlerts() {
@@ -256,6 +256,16 @@ public class AlertingPlugin extends StagemonitorPlugin implements ServletContain
 
 	public Map<String, Check> getChecks() {
 		return checks.getValue();
+	}
+
+	public void addCheck(Check check) throws IOException {
+		final LinkedHashMap<String, Check> newValue = new LinkedHashMap<String, Check>(getChecks());
+		newValue.put(check.getId(), check);
+		checks.update(newValue, SimpleSource.NAME);
+	}
+
+	public ThresholdMonitoringReporter getThresholdMonitoringReporter() {
+		return thresholdMonitoringReporter;
 	}
 
 	public IncidentRepository getIncidentRepository() {
@@ -322,17 +332,20 @@ public class AlertingPlugin extends StagemonitorPlugin implements ServletContain
 		return pushbulletAccessToken.getValue();
 	}
 
-	@Override
-	public void onStartup(Set<Class<?>> c, ServletContext ctx) throws ServletException {
-		final AlertingPlugin alertingPlugin = Stagemonitor.getConfiguration(AlertingPlugin.class);
-		ctx.addServlet(AlerterTypeServlet.class.getSimpleName(), new AlerterTypeServlet(alertingPlugin, Stagemonitor.getMeasurementSession()))
-				.addMapping("/stagemonitor/alerter-types");
+	public static class Initializer implements ServletContainerInitializer {
 
-		ctx.addServlet(IncidentServlet.class.getSimpleName(), new IncidentServlet(alertingPlugin))
-				.addMapping("/stagemonitor/incidents");
+		@Override
+		public void onStartup(Set<Class<?>> c, ServletContext ctx) {
+			final AlertingPlugin alertingPlugin = Stagemonitor.getPlugin(AlertingPlugin.class);
+			ctx.addServlet(AlerterTypeServlet.class.getSimpleName(), new AlerterTypeServlet(alertingPlugin, Stagemonitor.getMeasurementSession()))
+					.addMapping("/stagemonitor/alerter-types");
 
-		ctx.addServlet(TestAlertSenderServlet.class.getSimpleName(), new TestAlertSenderServlet())
-				.addMapping("/stagemonitor/test-alert");
+			ctx.addServlet(IncidentServlet.class.getSimpleName(), new IncidentServlet(alertingPlugin))
+					.addMapping("/stagemonitor/incidents");
+
+			ctx.addServlet(TestAlertSenderServlet.class.getSimpleName(), new TestAlertSenderServlet())
+					.addMapping("/stagemonitor/test-alert");
+		}
 	}
 
 }

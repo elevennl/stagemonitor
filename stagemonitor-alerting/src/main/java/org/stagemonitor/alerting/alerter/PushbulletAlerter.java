@@ -4,18 +4,17 @@ import java.util.HashMap;
 import java.util.Map;
 
 import org.stagemonitor.alerting.AlertingPlugin;
-import org.stagemonitor.alerting.incident.Incident;
 import org.stagemonitor.core.Stagemonitor;
 import org.stagemonitor.core.util.HttpClient;
 import org.stagemonitor.core.util.StringUtils;
 
-public class PushbulletAlerter implements Alerter {
+public class PushbulletAlerter extends Alerter {
 
 	private final AlertTemplateProcessor alertTemplateProcessor;
 	private final AlertingPlugin alertingPlugin;
 
 	public PushbulletAlerter() {
-		this(Stagemonitor.getConfiguration(AlertingPlugin.class));
+		this(Stagemonitor.getPlugin(AlertingPlugin.class));
 	}
 
 	public PushbulletAlerter(AlertingPlugin alertingPlugin) {
@@ -24,10 +23,10 @@ public class PushbulletAlerter implements Alerter {
 	}
 
 	@Override
-	public void alert(Incident incident, Subscription subscription) {
-		sendPushbulletNotification(subscription.getTarget(),
-				alertTemplateProcessor.processShortDescriptionTemplate(incident),
-				alertTemplateProcessor.processPlainTextTemplate(incident));
+	public void alert(AlertArguments alertArguments) {
+		sendPushbulletNotification(alertArguments.getSubscription().getTarget(),
+				alertTemplateProcessor.processShortDescriptionTemplate(alertArguments.getIncident()),
+				alertTemplateProcessor.processPlainTextTemplate(alertArguments.getIncident()));
 	}
 
 	public void sendPushbulletNotification(String channelTag, String subject, String content) {

@@ -2,15 +2,20 @@ package org.stagemonitor.web.monitor;
 
 import static org.stagemonitor.core.metrics.metrics2.MetricName.name;
 
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.security.Principal;
 import java.util.Collection;
 import java.util.Enumeration;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 import javax.servlet.FilterChain;
 import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpSession;
 
 import org.stagemonitor.core.Stagemonitor;
 import org.stagemonitor.core.configuration.Configuration;
@@ -19,11 +24,10 @@ import org.stagemonitor.core.util.StringUtils;
 import org.stagemonitor.requestmonitor.MonitoredRequest;
 import org.stagemonitor.requestmonitor.RequestMonitor;
 import org.stagemonitor.requestmonitor.RequestMonitorPlugin;
-import org.stagemonitor.requestmonitor.utils.IPAnonymizationUtils;
 import org.stagemonitor.web.WebPlugin;
 import org.stagemonitor.web.logging.MDCListener;
 import org.stagemonitor.web.monitor.filter.StatusExposingByteCountingServletResponse;
-import org.stagemonitor.web.monitor.widget.RequestTraceServlet;
+import org.stagemonitor.web.monitor.widget.WidgetAjaxRequestTraceReporter;
 
 public class MonitoredHttpRequest implements MonitoredRequest<HttpRequestTrace> {
 
@@ -33,6 +37,7 @@ public class MonitoredHttpRequest implements MonitoredRequest<HttpRequestTrace> 
 	private final Configuration configuration;
 	protected final WebPlugin webPlugin;
 	private final Metric2Registry metricRegistry;
+	private final RequestMonitorPlugin requestMonitorPlugin;
 
 	public MonitoredHttpRequest(HttpServletRequest httpServletRequest,
 								StatusExposingByteCountingServletResponse responseWrapper,
@@ -43,6 +48,7 @@ public class MonitoredHttpRequest implements MonitoredRequest<HttpRequestTrace> 
 		this.configuration = configuration;
 		this.webPlugin = configuration.getConfig(WebPlugin.class);
 		this.metricRegistry = Stagemonitor.getMetric2Registry();
+		requestMonitorPlugin = configuration.getConfig(RequestMonitorPlugin.class);
 	}
 
 	@Override
@@ -58,23 +64,33 @@ public class MonitoredHttpRequest implements MonitoredRequest<HttpRequestTrace> 
 		}
 		final String url = httpServletRequest.getRequestURI();
 		final String method = httpServletRequest.getMethod();
-		final String sessionId = httpServletRequest.getRequestedSessionId();
-		final String connectionId = httpServletRequest.getHeader(RequestTraceServlet.CONNECTION_ID);
+		final String connectionId = httpServletRequest.getHeader(WidgetAjaxRequestTraceReporter.CONNECTION_ID);
 		final String requestId = (String) httpServletRequest.getAttribute(MDCListener.STAGEMONITOR_REQUEST_ID_ATTR);
 		final boolean isShowWidgetAllowed = webPlugin.isWidgetAndStagemonitorEndpointsAllowed(httpServletRequest, configuration);
-		HttpRequestTrace request = new HttpRequestTrace(requestId, url, headers, method, sessionId,
-				connectionId, isShowWidgetAllowed);
+		HttpRequestTrace request = new HttpRequestTrace(requestId, url, headers, method, connectionId, isShowWidgetAllowed);
 
+		request.setReferringSite(getReferringSite());
 		request.setName(getRequestName());
-		String clientIp = getClientIp(httpServletRequest);
-		if (configuration.getConfig(RequestMonitorPlugin.class).isAnonymizeIPs()) {
-			clientIp = IPAnonymizationUtils.anonymize(clientIp);
-		}
-		request.setClientIp(clientIp);
-		final Principal userPrincipal = httpServletRequest.getUserPrincipal();
-		request.setUsername(userPrincipal != null ? userPrincipal.getName() : null);
 
 		return request;
+	}
+
+	private String getReferringSite() {
+		final String refererHeader = httpServletRequest.getHeader("Referer");
+		if (StringUtils.isEmpty(refererHeader)) {
+			return null;
+		}
+		String referrerHost;
+		try {
+			referrerHost = new URI(refererHeader).getHost();
+		} catch (URISyntaxException e) {
+			referrerHost = null;
+		}
+		if (httpServletRequest.getServerName().equals(referrerHost)) {
+			return null;
+		} else {
+			return referrerHost;
+		}
 	}
 
 	public static String getClientIp(HttpServletRequest request) {
@@ -124,16 +140,6 @@ public class MonitoredHttpRequest implements MonitoredRequest<HttpRequestTrace> 
 		return requestUri;
 	}
 
-	private boolean isParamExcluded(String queryParameter) {
-		final Collection<Pattern> confidentialQueryParams = webPlugin.getRequestParamsConfidential();
-		for (Pattern excludedParam : confidentialQueryParams) {
-			if (excludedParam.matcher(queryParameter).matches()) {
-				return true;
-			}
-		}
-		return false;
-	}
-
 	private Map<String, String> getHeaders(HttpServletRequest request) {
 		Map<String, String> headers = new HashMap<String, String>();
 		final Enumeration headerNames = request.getHeaderNames();
@@ -155,8 +161,21 @@ public class MonitoredHttpRequest implements MonitoredRequest<HttpRequestTrace> 
 
 	@Override
 	public void onPostExecute(RequestMonitor.RequestInformation<HttpRequestTrace> info) {
-		int status = responseWrapper.getStatus();
 		HttpRequestTrace request = info.getRequestTrace();
+
+		final String clientIp = getClientIp(httpServletRequest);
+		final String userName = getUserName(request);
+		final String userAgent = httpServletRequest.getHeader("user-agent");
+		final String sessionId = getSessionId();
+		request.setUsername(userName);
+		request.setSessionId(sessionId);
+		if (userName != null) {
+			request.setUniqueVisitorId(StringUtils.sha1Hash(userName));
+		} else {
+			request.setUniqueVisitorId(StringUtils.sha1Hash(clientIp + sessionId + userAgent));
+		}
+
+		int status = responseWrapper.getStatus();
 		request.setStatusCode(status);
 		metricRegistry.meter(name("request_throughput").tag("request_name", info.getRequestName()).tag("http_code", status).build()).mark();
 		metricRegistry.meter(name("request_throughput").tag("request_name", "All").tag("http_code", status).build()).mark();
@@ -180,20 +199,27 @@ public class MonitoredHttpRequest implements MonitoredRequest<HttpRequestTrace> 
 		// parameters inside the application
 		@SuppressWarnings("unchecked") // according to javadoc, its always a Map<String, String[]>
 		final Map<String, String[]> parameterMap = httpServletRequest.getParameterMap();
-		request.setParameters(getSafeQueryStringMap(parameterMap));
-	}
-
-	private Map<String, String> getSafeQueryStringMap(Map<String, String[]> parameterMap) {
 		Map<String, String> params = new HashMap<String, String>();
 		for (Map.Entry<String, String[]> entry : parameterMap.entrySet()) {
-			final boolean paramExcluded = isParamExcluded(entry.getKey());
-			if (paramExcluded) {
-				params.put(entry.getKey(), "XXXX");
-			} else {
-				params.put(entry.getKey(), StringUtils.toCommaSeparatedString(entry.getValue()));
-			}
+			params.put(entry.getKey(), StringUtils.toCommaSeparatedString(entry.getValue()));
 		}
-		return params;
+		Set<Pattern> confidentialParams = new HashSet<Pattern>();
+		confidentialParams.addAll(webPlugin.getRequestParamsConfidential());
+		confidentialParams.addAll(requestMonitorPlugin.getConfidentialParameters());
+		request.setParameters(requestMonitorPlugin.getSafeParameterMap(params, confidentialParams));
+	}
+
+	private String getSessionId() {
+		final HttpSession session = httpServletRequest.getSession(false);
+		return session != null ? session.getId() : null;
+	}
+
+	private String getUserName(HttpRequestTrace request) {
+		if (request.getUsername() != null) {
+			return request.getUsername();
+		}
+		final Principal userPrincipal = httpServletRequest.getUserPrincipal();
+		return userPrincipal != null ? userPrincipal.getName() : null;
 	}
 
 	/**

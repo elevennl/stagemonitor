@@ -9,10 +9,10 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import java.io.IOException;
 import java.util.HashSet;
 import java.util.Map;
 
-import com.codahale.metrics.SharedMetricRegistries;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -26,11 +26,38 @@ import org.stagemonitor.web.monitor.filter.StatusExposingByteCountingServletResp
 
 public class MonitoredHttpRequestTest {
 
-	private MonitoredHttpRequest monitoredHttpRequest;
-
 	@Before
 	public void setUp() throws Exception {
+		Stagemonitor.reset();
 		Stagemonitor.startMonitoring(new MeasurementSession("MonitoredHttpRequestTest", "testHost", "testInstance")).get();
+	}
+
+	@After
+	public void tearDown() throws Exception {
+		Stagemonitor.reset();
+	}
+
+	@Test
+	public void testGetRequestName() throws Exception {
+		final MonitoredHttpRequest monitoredHttpRequest = createMonitoredHttpRequest(new MockHttpServletRequest("GET", "/test.js"));
+		assertEquals("GET *.js", monitoredHttpRequest.getRequestName());
+		testGetInstanceName();
+	}
+
+	@Test
+	public void testGetInstanceName() throws Exception {
+		final MonitoredHttpRequest monitoredHttpRequest = createMonitoredHttpRequest(new MockHttpServletRequest("GET", "/test.js"));
+		assertEquals("localhost", monitoredHttpRequest.getInstanceName());
+	}
+
+	@Test
+	public void testIsMonitorForwardedExecutions() throws Exception {
+		final MonitoredHttpRequest monitoredHttpRequest = createMonitoredHttpRequest(new MockHttpServletRequest("GET", "/test.js"));
+		assertEquals(true, monitoredHttpRequest.isMonitorForwardedExecutions());
+	}
+
+	@Test
+	public void testCreateRequestTrace() throws Exception {
 		final MockHttpServletRequest request = new MockHttpServletRequest("GET", "/test.js");
 		request.addParameter("foo", "bar");
 		request.addParameter("bla", "blubb");
@@ -39,37 +66,8 @@ public class MonitoredHttpRequestTest {
 		request.addHeader("Cookie", "foobar");
 		request.addHeader("accept", "application/json");
 
-		monitoredHttpRequest = new MonitoredHttpRequest(
-				request,
-				new StatusExposingByteCountingServletResponse(new MockHttpServletResponse()),
-				new MockFilterChain(),
-				Stagemonitor.getConfiguration());
-	}
+		final MonitoredHttpRequest monitoredHttpRequest = createMonitoredHttpRequest(request);
 
-	@After
-	public void tearDown() throws Exception {
-		Stagemonitor.reset();
-		SharedMetricRegistries.clear();
-	}
-
-	@Test
-	public void testGetRequestName() throws Exception {
-		assertEquals("GET *.js", monitoredHttpRequest.getRequestName());
-		testGetInstanceName();
-	}
-
-	@Test
-	public void testGetInstanceName() {
-		assertEquals("localhost", monitoredHttpRequest.getInstanceName());
-	}
-
-	@Test
-	public void testIsMonitorForwardedExecutions() throws Exception {
-		assertEquals(true, monitoredHttpRequest.isMonitorForwardedExecutions());
-	}
-
-	@Test
-	public void testCreateRequestTrace() throws Exception {
 		final HttpRequestTrace requestTrace = monitoredHttpRequest.createRequestTrace();
 		assertNull(requestTrace.getParameters());
 		assertEquals("/test.js", requestTrace.getUrl());
@@ -83,8 +81,6 @@ public class MonitoredHttpRequestTest {
 		assertEquals("MonitoredHttpRequestTest", requestTrace.getApplication());
 		assertEquals("testHost", requestTrace.getHost());
 		assertEquals("testInstance", requestTrace.getInstance());
-		// anonymized
-		assertEquals("127.0.0.0", requestTrace.getClientIp());
 
 		assertEquals(new HashSet<String>(asList("accept")), requestTrace.getHeaders().keySet());
 		assertFalse(requestTrace.getHeaders().containsKey("cookie"));
@@ -99,5 +95,36 @@ public class MonitoredHttpRequestTest {
 		assertEquals("blubb", parameters.get("bla"));
 		assertEquals("XXXX", parameters.get("pwd"));
 		assertEquals("XXXX", parameters.get("creditCard"));
+	}
+
+	@Test
+	public void testReferringSite() throws Exception {
+		final MockHttpServletRequest request = new MockHttpServletRequest("GET", "/test.js");
+		request.addHeader("Referer", "https://www.github.com/stagemonitor/stagemonitor");
+
+		final MonitoredHttpRequest monitoredHttpRequest = createMonitoredHttpRequest(request);
+
+		final HttpRequestTrace requestTrace = monitoredHttpRequest.createRequestTrace();
+		assertEquals("www.github.com", requestTrace.getReferringSite());
+	}
+
+	@Test
+	public void testReferringSameHostSite() throws Exception {
+		final MockHttpServletRequest request = new MockHttpServletRequest("GET", "/test.js");
+		request.addHeader("Referer", "https://www.myapp.com:8080/categories");
+		request.setServerName("www.myapp.com");
+
+		final MonitoredHttpRequest monitoredHttpRequest = createMonitoredHttpRequest(request);
+
+		final HttpRequestTrace requestTrace = monitoredHttpRequest.createRequestTrace();
+		assertNull(requestTrace.getReferringSite());
+	}
+
+	private MonitoredHttpRequest createMonitoredHttpRequest(MockHttpServletRequest request) throws IOException {
+		return new MonitoredHttpRequest(
+				request,
+				new StatusExposingByteCountingServletResponse(new MockHttpServletResponse()),
+				new MockFilterChain(),
+				Stagemonitor.getConfiguration());
 	}
 }
