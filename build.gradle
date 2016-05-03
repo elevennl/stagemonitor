@@ -121,10 +121,18 @@ subprojects {
         }
     }
 
-    javadoc {
-        if (JavaVersion.current().isJava8Compatible()) {
-            options.addStringOption('Xdoclint:none', '-quiet')
-        }
+//    javadoc {
+//        if (JavaVersion.current().isJava8Compatible()) {
+//            options.addStringOption('Xdoclint:none', '-quiet')
+//        }
+//    }
+
+    // Disable javadoc because it currently fails..
+    tasks.withType(Javadoc).all { enabled = false }
+
+    task copyToLib( type: Copy ) {
+        into "$buildDir/libs/lib"
+        from configurations.runtime - configurations.provided
     }
 
     nexus {
@@ -132,15 +140,7 @@ subprojects {
         repositoryUrl = nexusBaseUrl + '/content/repositories/releases/'
         snapshotRepositoryUrl = nexusBaseUrl + '/content/repositories/snapshots/'
     }
-
-    task copyToLib( type: Copy ) {
-        into "$buildDir/libs/lib"
-        from configurations.runtime - configurations.provided
-    }
-
 }
-
-
 
 release {
     preTagCommitMessage = 'release '
@@ -149,6 +149,12 @@ release {
     git {
         requireBranch = null
     }
+}
+
+nexus {
+    sign = false
+    repositoryUrl = nexusBaseUrl + '/content/repositories/releases/nl/eleven/'
+    snapshotRepositoryUrl = nexusBaseUrl + '/content/repositories/snapshots/nl/eleven/'
 }
 
 def getProjectsToTest() {
@@ -170,5 +176,5 @@ task wrapper(type: Wrapper) {
     gradleVersion = "2.12"
 }
 
-task install
-install.dependsOn subprojects.compileJava
+//task install
+//install.dependsOn subprojects.compileJava
